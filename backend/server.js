@@ -18,6 +18,7 @@ const aiRoutes = require("./routes/aiRoutes");
 const adminRoutes = require("./routes/adminRoutes");
 const privacyRoutes = require("./routes/privacyRoutes");
 const systemRoutes = require("./routes/systemRoutes");
+const paymentRoutes = require("./routes/paymentRoutes");
 
 const createApp = () => {
     const app = express();
@@ -119,6 +120,7 @@ const createApp = () => {
     app.use("/api/ai", requireDb, aiRoutes);
     app.use("/api/admin", requireDb, adminRoutes);
     app.use("/api/privacy", requireDb, privacyRoutes);
+    app.use("/api/payments", requireDb, paymentRoutes);
 
     app.get("/", (req, res) => {
         res.send("MedWatch AI Backend is Running!");

@@ -5,7 +5,15 @@ const Medicine = require("../models/Medicine");
 const MedicinePrice = require("../models/MedicinePrice");
 const { protect, authorize } = require("../middleware/authMiddleware");
 const { scoreMedicineMatch } = require("../services/fuzzySearch");
-const { fetchOpenFdaDrugs, fetchNihRxTerms } = require("../services/liveDataService");
+const {
+    fetchOpenFdaDrugs,
+    fetchOpenFdaDrugLabel,
+    fetchOpenFdaRecalls,
+    fetchNihRxTerms,
+    fetchRxNavInfo,
+    fetchWikipediaMedia
+} = require("../services/liveDataService");
+const { resolveMedicineMedia, buildPubChemStructureUrl } = require("../services/mediaResolver");
 const { recordAudit } = require("../services/auditService");
 
 // Get medicines with fast server-side pagination, search, category & sort - Public API
@@ -98,7 +106,10 @@ router.get("/", async (req, res) => {
             totalPages: Math.max(1, Math.ceil(total / limitNum)),
             categories: categories.filter(Boolean).sort(),
             suggestion,
-            data: items
+            data: items.map((m) => ({
+                ...m,
+                imageUrl: m.imageUrl || resolveMedicineMedia(m).imageUrl
+            }))
         });
     } catch {
         res.status(500).json({
@@ -108,7 +119,25 @@ router.get("/", async (req, res) => {
     }
 });
 
-// Live External API Lookup (OpenFDA Drug NDC + NIH ClinicalTables RxTerms)
+// Live OpenFDA Drug Enforcement / Recalls Feed
+router.get("/recalls/live", async (req, res) => {
+    try {
+        const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+        const limit = Math.min(20, Math.max(1, parseInt(req.query.limit, 10) || 8));
+        const recalls = await fetchOpenFdaRecalls({ query: q, limit });
+        res.status(200).json({
+            success: true,
+            count: recalls.length,
+            data: recalls,
+            source: "OpenFDA Drug Enforcement Live API",
+            fetchedAt: new Date().toISOString()
+        });
+    } catch {
+        res.status(500).json({ success: false, message: "Failed to fetch live drug recalls." });
+    }
+});
+
+// Live External API Lookup (OpenFDA Drug NDC + NIH ClinicalTables RxTerms + Wikipedia)
 router.get("/live-lookup", async (req, res) => {
     try {
         const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
@@ -226,6 +255,97 @@ router.get("/search", async (req, res) => {
     }
 });
 
+// Real-Time Monograph & Clinical Reference (OpenFDA Drug Label + NIH RxNav + Wikipedia + PubChem + Recalls)
+router.get("/:id/monograph", async (req, res) => {
+    try {
+        if (!mongoose.isValidObjectId(req.params.id)) {
+            return res.status(400).json({ success: false, message: "Invalid medicine ID." });
+        }
+        const medicine = await Medicine.findById(req.params.id).lean();
+        if (!medicine) {
+            return res.status(404).json({ success: false, message: "Medicine not found." });
+        }
+
+        const lookupTerm = medicine.genericName && !medicine.genericName.toLowerCase().includes("demo")
+            ? medicine.genericName
+            : medicine.name;
+
+        const [fdaLabel, rxNav, wiki, recalls] = await Promise.all([
+            fetchOpenFdaDrugLabel(lookupTerm),
+            fetchRxNavInfo(lookupTerm),
+            fetchWikipediaMedia(lookupTerm),
+            fetchOpenFdaRecalls({ query: lookupTerm.split(/\s+/)[0], limit: 3 })
+        ]);
+
+        const media = resolveMedicineMedia(medicine);
+        const structureImageUrl = medicine.structureImageUrl || buildPubChemStructureUrl(lookupTerm);
+
+        res.status(200).json({
+            success: true,
+            medicine: {
+                ...medicine,
+                imageUrl: medicine.imageUrl || media.imageUrl,
+                structureImageUrl
+            },
+            liveMonograph: {
+                fdaLabel,
+                rxNav,
+                wiki,
+                recalls,
+                structureImageUrl,
+                fetchedAt: new Date().toISOString()
+            }
+        });
+    } catch {
+        res.status(500).json({ success: false, message: "Failed to fetch live medicine monograph." });
+    }
+});
+
+// Import a live OpenFDA lookup item into catalog - Admin only
+router.post("/import-live", protect, authorize("admin"), async (req, res) => {
+    try {
+        const payload = req.body || {};
+        if (!payload.name || typeof payload.name !== "string") {
+            return res.status(400).json({ success: false, message: "Medicine name is required." });
+        }
+        const existing = await Medicine.findOne({
+            name: { $regex: `^${payload.name.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, $options: "i" }
+        });
+        if (existing) {
+            return res.status(200).json({ success: true, alreadyExists: true, data: existing, message: "Medicine already in catalog." });
+        }
+        const media = resolveMedicineMedia(payload);
+        const created = await Medicine.create({
+            name: payload.name.trim().slice(0, 120),
+            genericName: (payload.genericName || payload.name).trim().slice(0, 120),
+            manufacturer: (payload.manufacturer || "FDA Registered Labeler").trim().slice(0, 120),
+            mrp: Number(payload.mrp) > 0 ? Number(payload.mrp) : 65,
+            category: (payload.category || "General Catalog").trim().slice(0, 60),
+            dosage: (payload.dosage || "Standard").trim(),
+            description: (payload.description || "Imported from OpenFDA live feed.").trim(),
+            activeIngredients: payload.activeIngredients || "",
+            imageUrl: payload.imageUrl || media.imageUrl,
+            structureImageUrl: payload.structureImageUrl || buildPubChemStructureUrl(payload.genericName || payload.name),
+            sourceCitation: payload.sourceCitation || "OpenFDA Drug NDC Live Import",
+            sourceUrl: payload.sourceUrl || "https://api.fda.gov/drug/ndc.json",
+            sourceLastVerifiedAt: new Date(),
+            editorialStatus: "verified",
+            isDemo: false
+        });
+        await recordAudit({
+            req,
+            action: "catalog.openfda_imported",
+            domain: "catalog",
+            targetType: "Medicine",
+            targetId: created._id,
+            summary: `Imported ${created.name} from live OpenFDA lookup`
+        });
+        res.status(201).json({ success: true, message: `${created.name} imported into catalog!`, data: created });
+    } catch {
+        res.status(500).json({ success: false, message: "Failed to import live record." });
+    }
+});
+
 // Get single medicine detail + pharmacy prices
 router.get("/:id", async (req, res) => {
     try {
@@ -321,7 +441,8 @@ router.patch("/:id", protect, authorize("admin"), async (req, res) => {
 
         const allowed = [
             "name", "genericName", "manufacturer", "mrp", "category",
-            "dosage", "description", "sourceCitation", "editorialStatus", "warnings", "storageInfo"
+            "dosage", "description", "sourceCitation", "editorialStatus",
+            "warnings", "storageInfo", "imageUrl", "packSize", "prescriptionStatus"
         ];
         const updates = { sourceLastVerifiedAt: new Date() };
         for (const key of allowed) {

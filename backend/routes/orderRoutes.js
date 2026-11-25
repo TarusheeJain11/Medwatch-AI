@@ -12,6 +12,7 @@ const SupportTicket = require("../models/SupportTicket");
 const { protect, authorize, isPharmacyOwnerRole } = require("../middleware/authMiddleware");
 const { recordAudit } = require("../services/auditService");
 const { fetchOsrmRouteWaypoints } = require("../services/liveDataService");
+const { resolveProductImage } = require("../services/mediaResolver");
 const { scheduleAutoLiveOrder, clearOrderTimers } = require("../services/liveOrderEngine");
 const eventBus = require("../services/eventBus");
 
@@ -99,9 +100,12 @@ router.get("/demo-products", async (req, res) => {
                 isNonMedicalOnly: true,
                 serviceFee: 25,
                 taxRatePercent: 5,
-                cancellationPolicy: "Free cancellation anytime before the courier is dispatched. Sandbox payment only (no real money charged)."
+                cancellationPolicy: "Free cancellation anytime before the courier is dispatched."
             },
-            data: products
+            data: products.map((p) => ({
+                ...p,
+                imageUrl: p.imageUrl || resolveProductImage(p)
+            }))
         });
     } catch {
         res.status(500).json({ success: false, message: "Failed to load products." });
@@ -241,6 +245,9 @@ router.post("/", protect, async (req, res) => {
             status: "active",
             currentCoords: { lat: waypoints[0].lat, lng: waypoints[0].lng, label: waypoints[0].label },
             routeWaypoints: waypoints,
+            routeGeometry: osrmRoute?.routeGeometry || waypoints.map((w) => ({ lat: w.lat, lng: w.lng })),
+            distanceKm: osrmRoute?.distanceKm || 3.5,
+            routingProvider: osrmRoute?.provider || "Estimated Local Route",
             waypointIndex: 0,
             etaRangeText: `${etaMinutes}–${etaMinutes + 5} mins (${osrmRoute ? `${osrmRoute.distanceKm} km via OSRM` : "Estimated"})`,
             lastUpdatedAt: new Date()
@@ -319,11 +326,30 @@ router.get("/my", protect, async (req, res) => {
     try {
         const orders = await DemoOrder.find({ customer: req.user._id })
             .populate("pharmacy", "name city address phone")
+            .populate("paymentTransaction", "transactionId gatewayOrderId gatewayPaymentId method methodDetails status capturedAt refundId")
             .sort({ createdAt: -1 })
             .lean();
         res.status(200).json({ success: true, count: orders.length, data: orders });
     } catch {
         res.status(500).json({ success: false, message: "Failed to load orders." });
+    }
+});
+
+// Admin: Get all platform orders with customer, pharmacy, and payment info
+router.get("/admin/all", protect, authorize("admin"), async (req, res) => {
+    try {
+        const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
+        const filter = status && status !== "all" ? { status } : {};
+        const orders = await DemoOrder.find(filter)
+            .populate("customer", "name email")
+            .populate("pharmacy", "name city")
+            .populate("paymentTransaction", "transactionId gatewayPaymentId method methodDetails status")
+            .sort({ createdAt: -1 })
+            .limit(100)
+            .lean();
+        res.status(200).json({ success: true, count: orders.length, data: orders });
+    } catch {
+        res.status(500).json({ success: false, message: "Failed to load platform orders." });
     }
 });
 

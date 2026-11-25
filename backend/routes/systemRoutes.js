@@ -8,6 +8,11 @@ const KnowledgeDoc = require("../models/KnowledgeDoc");
 const Pharmacy = require("../models/Pharmacy");
 const { optionalAuth } = require("../middleware/authMiddleware");
 const eventBus = require("../services/eventBus");
+const {
+    geocodeAddress,
+    reverseGeocode,
+    fetchLiveWeatherAdvisory
+} = require("../services/liveDataService");
 
 const DB_STATES = {
     0: "disconnected",
@@ -45,12 +50,15 @@ const getExternalProbes = async (forceRefresh = false) => {
     if (!forceRefresh && cachedExternalProbes && Date.now() - cachedProbesAt < 30000) {
         return cachedExternalProbes;
     }
-    const [openFda, nihRxTerms, osrmRouting] = await Promise.all([
+    const [openFda, openFdaLabel, openFdaRecalls, nihRxTerms, osrmRouting, nominatimGeo] = await Promise.all([
         probeUrl("https://api.fda.gov/drug/ndc.json?limit=1"),
+        probeUrl("https://api.fda.gov/drug/label.json?limit=1"),
+        probeUrl("https://api.fda.gov/drug/enforcement.json?limit=1"),
         probeUrl("https://clinicaltables.nlm.nih.gov/api/rxterms/v3/search?terms=vitamin&maxList=1"),
-        probeUrl("https://router.project-osrm.org/route/v1/driving/75.5762,31.3260;75.5912,31.3370?overview=false")
+        probeUrl("https://router.project-osrm.org/route/v1/driving/75.5762,31.3260;75.5912,31.3370?overview=false"),
+        probeUrl("https://nominatim.openstreetmap.org/reverse?format=json&lat=31.3260&lon=75.5762")
     ]);
-    cachedExternalProbes = { openFda, nihRxTerms, osrmRouting };
+    cachedExternalProbes = { openFda, openFdaLabel, openFdaRecalls, nihRxTerms, osrmRouting, nominatimGeo };
     cachedProbesAt = Date.now();
     return cachedExternalProbes;
 };
@@ -120,6 +128,8 @@ router.get("/status", async (req, res) => {
                 },
                 medicineReferenceApi: {
                     openFda: external.openFda,
+                    openFdaLabel: external.openFdaLabel,
+                    openFdaRecalls: external.openFdaRecalls,
                     nihRxTerms: external.nihRxTerms
                 },
                 pharmacyDataService: {
@@ -134,7 +144,8 @@ router.get("/status", async (req, res) => {
                     status: "operational",
                     connectedClients: streamStats.connectedClients
                 },
-                routingService: external.osrmRouting
+                routingService: external.osrmRouting,
+                geocodingService: external.nominatimGeo
             },
             featureFlags: flagMap,
             flagsList: flags,
@@ -190,6 +201,36 @@ router.get("/events/stream", optionalAuth, (req, res) => {
         clearInterval(heartbeat);
         eventBus.removeClient(client);
     });
+});
+
+// Live OpenStreetMap Nominatim Address Search
+router.get("/location/search", async (req, res) => {
+    const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    if (!q || q.length < 2) {
+        return res.status(400).json({ success: false, message: "Enter at least 2 characters to search address." });
+    }
+    const results = await geocodeAddress(q);
+    res.status(200).json({ success: true, count: results.length, data: results });
+});
+
+// Live OpenStreetMap Nominatim Reverse Geocode
+router.get("/location/reverse", async (req, res) => {
+    const lat = Number(req.query.lat);
+    const lng = Number(req.query.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        return res.status(400).json({ success: false, message: "Valid latitude and longitude are required." });
+    }
+    const location = await reverseGeocode(lat, lng);
+    res.status(200).json({ success: Boolean(location), data: location });
+});
+
+// Live Open-Meteo City Weather & Cold-Chain Pharmacy Advisory
+router.get("/live-weather", async (req, res) => {
+    const lat = Number(req.query.lat) || 31.3260;
+    const lng = Number(req.query.lng) || 75.5762;
+    const city = typeof req.query.city === "string" && req.query.city.trim() ? req.query.city.trim() : "Jalandhar";
+    const advisory = await fetchLiveWeatherAdvisory(lat, lng, city);
+    res.status(200).json({ success: Boolean(advisory), data: advisory });
 });
 
 // REST Snapshot on Reconnect

@@ -46,6 +46,39 @@ const medicineSchema = new mongoose.Schema(
             type: String,
             default: "Educational information only. Consult a licensed healthcare professional."
         },
+        imageUrl: {
+            type: String,
+            default: "/images/meds/tablet.svg"
+        },
+        structureImageUrl: {
+            type: String,
+            default: ""
+        },
+        packSize: {
+            type: String,
+            default: "Strip of 10"
+        },
+        prescriptionStatus: {
+            type: String,
+            enum: ["OTC", "Rx / Reference", "Supplement"],
+            default: "Rx / Reference"
+        },
+        routeOfAdministration: {
+            type: String,
+            default: "Oral"
+        },
+        therapeuticClass: {
+            type: String,
+            default: ""
+        },
+        hsnCode: {
+            type: String,
+            default: "3004"
+        },
+        gstRate: {
+            type: Number,
+            default: 5
+        },
         aliases: {
             type: [String],
             default: []

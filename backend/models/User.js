@@ -100,6 +100,27 @@ const userSchema = new mongoose.Schema(
             city: { type: String, default: "Jalandhar" },
             accessibilityNeeds: { type: String, default: "" }
         },
+        savedAddresses: {
+            type: [
+                {
+                    label: { type: String, default: "Home" },
+                    recipientName: { type: String, default: "" },
+                    phone: { type: String, default: "" },
+                    addressLine: { type: String, required: true },
+                    locality: { type: String, default: "" },
+                    city: { type: String, default: "Jalandhar" },
+                    pinCode: { type: String, default: "" },
+                    lat: { type: Number, default: null },
+                    lng: { type: Number, default: null },
+                    isDefault: { type: Boolean, default: false }
+                }
+            ],
+            default: []
+        },
+        savedMedicines: {
+            type: [{ type: mongoose.Schema.Types.ObjectId, ref: "Medicine" }],
+            default: []
+        },
         lastLoginAt: {
             type: Date,
             default: null

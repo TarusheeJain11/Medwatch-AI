@@ -1,8 +1,20 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { apiRequest } from "../services/api";
 import { StatusBadge, SkeletonCards } from "../components/StatusBadge";
+import SmartImage from "../components/SmartImage";
+
+const haversineKm = (lat1, lng1, lat2, lng2) => {
+    const toRad = (d) => (d * Math.PI) / 180;
+    const R = 6371;
+    const dLat = toRad(lat2 - lat1);
+    const dLng = toRad(lng2 - lng1);
+    const a =
+        Math.sin(dLat / 2) ** 2 +
+        Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+    return Number((2 * R * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))).toFixed(1));
+};
 
 export default function Directory() {
     const { setPreferredPharmacyId } = useAuth();
@@ -19,6 +31,10 @@ export default function Directory() {
     const [totalPages, setTotalPages] = useState(1);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState("");
+
+    const [userCoords, setUserCoords] = useState(null);
+    const [userAreaLabel, setUserAreaLabel] = useState("");
+    const [mapPharmacy, setMapPharmacy] = useState(null);
 
     const loadDirectory = useCallback(async (pageVal = page) => {
         setLoading(true);
@@ -52,6 +68,40 @@ export default function Directory() {
         loadDirectory(page);
     }, [city, verifiedOnly, page]);
 
+    const detectGpsLocation = () => {
+        if (!navigator.geolocation) return;
+        navigator.geolocation.getCurrentPosition(
+            async (pos) => {
+                const lat = pos.coords.latitude;
+                const lng = pos.coords.longitude;
+                setUserCoords({ lat, lng });
+                try {
+                    const geo = await apiRequest(`/location/reverse?lat=${lat}&lng=${lng}`);
+                    if (geo?.data?.city || geo?.data?.locality) {
+                        setUserAreaLabel(`${geo.data.locality || ""}, ${geo.data.city || ""}`.replace(/^,\s*/, ""));
+                    }
+                } catch {
+                    setUserAreaLabel("Current GPS Location");
+                }
+            },
+            () => {
+                setUserCoords({ lat: 31.3260, lng: 75.5762 });
+                setUserAreaLabel("Jalandhar Central (Fallback)");
+            }
+        );
+    };
+
+    const sortedPharmacies = useMemo(() => {
+        const list = pharmacies.map((p) => ({
+            ...p,
+            distanceKm: userCoords && p.lat && p.lng ? haversineKm(userCoords.lat, userCoords.lng, p.lat, p.lng) : null
+        }));
+        if (userCoords) {
+            list.sort((a, b) => (a.distanceKm ?? 9999) - (b.distanceKm ?? 9999));
+        }
+        return list;
+    }, [pharmacies, userCoords]);
+
     const handleFilterSubmit = (e) => {
         e.preventDefault();
         setPage(1);
@@ -65,11 +115,16 @@ export default function Directory() {
 
     return (
         <div>
-            <div style={{ marginBottom: 20 }}>
-                <h1 style={{ fontSize: 28 }}>Verified Pharmacy Directory</h1>
-                <p style={{ color: "var(--mw-muted)", fontSize: 14 }}>
-                    Showing {pharmacies.length} of <strong>{total.toLocaleString()}</strong> pharmacies across India. Filter by city, 24-hour availability, or wheelchair accessibility.
-                </p>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12, marginBottom: 20 }}>
+                <div>
+                    <h1 style={{ fontSize: 28 }}>Verified Pharmacy Directory</h1>
+                    <p style={{ color: "var(--mw-muted)", fontSize: 14 }}>
+                        Showing {pharmacies.length} of <strong>{total.toLocaleString()}</strong> pharmacies across India. Filter by city, accessibility, 24×7 availability, or GPS distance.
+                    </p>
+                </div>
+                <button type="button" className="btn btn-secondary btn-sm" onClick={detectGpsLocation}>
+                    {userCoords ? `Near: ${userAreaLabel || "GPS Active"}` : "Sort by My GPS Location"}
+                </button>
             </div>
 
             <form onSubmit={handleFilterSubmit} className="card-compact" style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 20 }}>
@@ -108,40 +163,81 @@ export default function Directory() {
 
             {error && <div className="alert-box error">{error}</div>}
 
+            {mapPharmacy && (
+                <section className="card" style={{ marginBottom: 20 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                        <div>
+                            <h2 style={{ fontSize: 18 }}>Live OpenStreetMap Location: {mapPharmacy.name}</h2>
+                            <small style={{ color: "var(--mw-muted)" }}>
+                                {mapPharmacy.address}, {mapPharmacy.city} ({Number(mapPharmacy.lat || 31.326).toFixed(4)}, {Number(mapPharmacy.lng || 75.576).toFixed(4)})
+                            </small>
+                        </div>
+                        <button type="button" className="btn btn-outline btn-sm" onClick={() => setMapPharmacy(null)}>Close Map ✕</button>
+                    </div>
+                    <iframe
+                        title={`Map for ${mapPharmacy.name}`}
+                        width="100%"
+                        height="260"
+                        style={{ border: "1px solid var(--mw-border)", borderRadius: 12 }}
+                        src={`https://www.openstreetmap.org/export/embed.html?bbox=${(mapPharmacy.lng || 75.576) - 0.015}%2C${(mapPharmacy.lat || 31.326) - 0.01}%2C${(mapPharmacy.lng || 75.576) + 0.015}%2C${(mapPharmacy.lat || 31.326) + 0.01}&layer=mapnik&marker=${mapPharmacy.lat || 31.326}%2C${mapPharmacy.lng || 75.576}`}
+                    />
+                </section>
+            )}
+
             {loading ? (
                 <SkeletonCards count={4} />
-            ) : pharmacies.length === 0 ? (
+            ) : sortedPharmacies.length === 0 ? (
                 <div className="card" style={{ textAlign: "center", padding: 32 }}>
                     <p>No pharmacies match your filters.</p>
                 </div>
             ) : (
                 <>
                     <div className="grid-2">
-                        {pharmacies.map((p) => (
+                        {sortedPharmacies.map((p) => (
                             <article key={p._id} className="card-compact" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 10 }}>
                                 <div style={{ display: "grid", gap: 6 }}>
-                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                                    <SmartImage
+                                        src={p.imageUrl}
+                                        fallbackSrc="/images/pharmacy-verified.svg"
+                                        alt={p.name}
+                                        height={110}
+                                        style={{ marginBottom: 4 }}
+                                    />
+                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                                         <h2 style={{ fontSize: 18 }}>{p.name}</h2>
-                                        <StatusBadge status={p.isVerified ? "verified" : "pending"} label={p.isVerified ? "Verified" : "Pending Review"} />
+                                        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                                            {p.distanceKm !== null && (
+                                                <span className="status-badge neutral">{p.distanceKm} km away</span>
+                                            )}
+                                            <StatusBadge status={p.isVerified ? "verified" : "pending"} label={p.isVerified ? "Verified" : "Pending Review"} />
+                                        </div>
                                     </div>
                                     <p style={{ fontSize: 13, color: "var(--mw-muted)" }}>
-                                        {p.address}, {p.city}
+                                        {p.address}, {p.city}{p.state ? `, ${p.state}` : ""}
                                     </p>
                                     <div style={{ fontSize: 13 }}>
-                                        <strong>Hours:</strong> {p.openingHours || "08:00 AM - 10:00 PM"}
+                                        <strong>Hours:</strong> {p.openingHours || "08:00 AM - 10:00 PM"} · <strong>ETA:</strong> {p.deliveryEtaText || "20–30 mins"}
                                     </div>
                                     <div style={{ fontSize: 13 }}>
-                                        <strong>Phone:</strong> {p.phone || "Directory Support"}
+                                        <strong>Phone:</strong> {p.phone || "Directory Support"} · <strong>License:</strong> {p.licenseNumber || "Verified Registry"}
                                     </div>
                                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 4 }}>
                                         {(p.accessibilityFeatures || []).map((feat, idx) => (
                                             <span key={idx} className="status-badge neutral">{feat}</span>
                                         ))}
+                                        {(p.servicesOffered || []).map((srv, idx) => (
+                                            <span key={`srv-${idx}`} className="status-badge verified">{srv}</span>
+                                        ))}
                                     </div>
                                 </div>
-                                <button type="button" className="btn btn-secondary btn-sm" onClick={() => orderFromPharmacy(p._id)}>
-                                    Order Care Kits From This Pharmacy →
-                                </button>
+                                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                                    <button type="button" className="btn btn-secondary btn-sm" style={{ flex: 1 }} onClick={() => orderFromPharmacy(p._id)}>
+                                        Order Care Kits →
+                                    </button>
+                                    <button type="button" className="btn btn-outline btn-sm" onClick={() => setMapPharmacy(p)}>
+                                        View Map
+                                    </button>
+                                </div>
                             </article>
                         ))}
                     </div>

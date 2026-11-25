@@ -5,16 +5,25 @@ import { apiRequest } from "../services/api";
 import { t } from "../services/i18n";
 import { SearchIcon, MicIcon, ShieldCrossIcon, BuildingIcon, TruckIcon, SparkleIcon } from "../components/Icons";
 import { StatusBadge, SkeletonCards } from "../components/StatusBadge";
+import SmartImage from "../components/SmartImage";
+
+const HEALTH_CONCERNS = [
+    { label: "Pain & Fever", query: "Paracetamol", desc: "Analgesics, antipyretics & relief gels" },
+    { label: "Vitamins & Immunity", query: "Vitamin", desc: "Vitamin C, D3, B12, Zinc & Folic Acid" },
+    { label: "Heart & Lipid Care", query: "Atorvastatin", desc: "Cardiovascular & blood pressure references" },
+    { label: "Diabetes Care", query: "Metformin", desc: "Glycemic management & monitors" },
+    { label: "Digestive Care", query: "Omeprazole", desc: "Acidity, gut health & hydration" },
+    { label: "Respiratory Care", query: "Salbutamol", desc: "Inhalers, antihistamines & steam care" }
+];
 
 export default function Home() {
-    const { language, addToCart, reconnectSse } = useAuth();
+    const { language, addToCart, reconnectSse, user } = useAuth();
     const navigate = useNavigate();
 
     const [query, setQuery] = useState("");
     const [suggestions, setSuggestions] = useState([]);
     const [showAuto, setShowAuto] = useState(false);
 
-    // Independent section states (so one failure never hides healthy sections)
     const [medicines, setMedicines] = useState([]);
     const [medTotal, setMedTotal] = useState(null);
     const [medLoading, setMedLoading] = useState(true);
@@ -28,6 +37,9 @@ export default function Home() {
     const [storeTotal, setStoreTotal] = useState(null);
     const [storeLoading, setStoreLoading] = useState(true);
     const [storeError, setStoreError] = useState("");
+
+    const [weatherAdvisory, setWeatherAdvisory] = useState(null);
+    const [liveRecalls, setLiveRecalls] = useState([]);
 
     const [categories, setCategories] = useState([]);
     const [addedToast, setAddedToast] = useState("");
@@ -45,10 +57,13 @@ export default function Home() {
         setPharmError("");
         setStoreError("");
 
-        const [medRes, pharmRes, prodRes] = await Promise.allSettled([
+        const city = encodeURIComponent(user?.preferences?.city || "Jalandhar");
+        const [medRes, pharmRes, prodRes, weatherRes, recallRes] = await Promise.allSettled([
             apiRequest("/medicines?limit=4", { cacheKey: "home_meds" }),
             apiRequest("/pharmacies?limit=1", { cacheKey: "home_pharms" }),
-            apiRequest("/orders/demo-products?limit=4", { cacheKey: "home_store" })
+            apiRequest("/orders/demo-products?limit=4", { cacheKey: "home_store" }),
+            apiRequest(`/live-weather?city=${city}`, { cacheKey: "home_weather" }),
+            apiRequest("/medicines/recalls/live?limit=3", { cacheKey: "home_recalls" })
         ]);
 
         if (!mountedRef.current) return;
@@ -84,7 +99,14 @@ export default function Home() {
             setStoreError(prodRes.reason?.message || "Failed to load wellness products.");
         }
         setStoreLoading(false);
-    }, []);
+
+        if (weatherRes.status === "fulfilled" && weatherRes.value?.data) {
+            setWeatherAdvisory(weatherRes.value.data);
+        }
+        if (recallRes.status === "fulfilled" && Array.isArray(recallRes.value?.data)) {
+            setLiveRecalls(recallRes.value.data);
+        }
+    }, [user?.preferences?.city]);
 
     useEffect(() => {
         mountedRef.current = true;
@@ -245,6 +267,18 @@ export default function Home() {
                 </div>
             </section>
 
+            {/* Live Open-Meteo Cold-Chain & Delivery Telemetry */}
+            {weatherAdvisory && (
+                <div className="alert-box info" style={{ alignItems: "center" }}>
+                    <div>
+                        <strong>Live Delivery &amp; Cold-Chain Telemetry ({weatherAdvisory.city}):</strong>{" "}
+                        {weatherAdvisory.temperatureC}°C · Humidity {weatherAdvisory.humidityPercent}% · Wind {weatherAdvisory.windKmh} km/h —{" "}
+                        <span>{weatherAdvisory.storageAdvisory}</span>
+                    </div>
+                    <span className="status-badge verified">{weatherAdvisory.provider}</span>
+                </div>
+            )}
+
             {addedToast && (
                 <div className="alert-box success" role="status">
                     <span>{addedToast}</span>
@@ -278,9 +312,9 @@ export default function Home() {
                 <div className="grid-4">
                     <Link to="/catalog" className="card-compact" style={{ display: "block" }}>
                         <div style={{ color: "var(--mw-teal)", marginBottom: 8 }}><ShieldCrossIcon size={24} /></div>
-                        <h3 style={{ fontSize: 17, marginBottom: 6 }}>Search Medicines &amp; Prices</h3>
+                        <h3 style={{ fontSize: 17, marginBottom: 6 }}>Search Medicines &amp; Monographs</h3>
                         <p style={{ fontSize: 13, color: "var(--mw-muted)" }}>
-                            Compare pharmacy prices across {medTotal !== null ? medTotal.toLocaleString() : "our"} OpenFDA &amp; reference medicines.
+                            Compare prices across {medTotal !== null ? medTotal.toLocaleString() : "our"} medicines with live OpenFDA labels &amp; NIH RxNav.
                         </p>
                     </Link>
 
@@ -288,15 +322,15 @@ export default function Home() {
                         <div style={{ color: "var(--mw-teal)", marginBottom: 8 }}><BuildingIcon size={24} /></div>
                         <h3 style={{ fontSize: 17, marginBottom: 6 }}>Find Nearby Pharmacies</h3>
                         <p style={{ fontSize: 13, color: "var(--mw-muted)" }}>
-                            Filter {pharmaciesTotal !== null ? pharmaciesTotal.toLocaleString() : "verified"} pharmacies by city, 24x7 hours, and accessibility.
+                            Locate {pharmaciesTotal !== null ? pharmaciesTotal.toLocaleString() : "verified"} pharmacies by GPS distance, 24x7 hours &amp; accessibility.
                         </p>
                     </Link>
 
                     <Link to="/orders" className="card-compact" style={{ display: "block" }}>
                         <div style={{ color: "var(--mw-teal)", marginBottom: 8 }}><TruckIcon size={24} /></div>
-                        <h3 style={{ fontSize: 17, marginBottom: 6 }}>Shop Care Kits &amp; Track Live</h3>
+                        <h3 style={{ fontSize: 17, marginBottom: 6 }}>Shop Care Kits &amp; Pay Securely</h3>
                         <p style={{ fontSize: 13, color: "var(--mw-muted)" }}>
-                            Order thermometers, oximeters, &amp; first-aid kits with simulated live OSRM street tracking.
+                            Pay via UPI, Card, NetBanking, or COD and track live OSRM street courier delivery.
                         </p>
                     </Link>
 
@@ -304,13 +338,34 @@ export default function Home() {
                         <div style={{ color: "var(--mw-teal)", marginBottom: 8 }}><SparkleIcon size={24} /></div>
                         <h3 style={{ fontSize: 17, marginBottom: 6 }}>Ask Care AI &amp; Support</h3>
                         <p style={{ fontSize: 13, color: "var(--mw-muted)" }}>
-                            Get instant cited answers about medicines, policies, or reach human support anytime.
+                            Get instant cited answers from reviewed records or submit a support ticket anytime.
                         </p>
                     </Link>
                 </div>
             </section>
 
-            {/* Popular Care Products */}
+            {/* Health Concerns Explorer */}
+            <section style={{ marginBottom: 32 }}>
+                <h2 style={{ fontSize: 22, marginBottom: 14 }}>Browse by Health Concern</h2>
+                <div className="grid-3">
+                    {HEALTH_CONCERNS.map((item) => (
+                        <Link
+                            key={item.label}
+                            to={`/catalog?q=${encodeURIComponent(item.query)}`}
+                            className="card-compact"
+                            style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}
+                        >
+                            <div>
+                                <strong style={{ fontSize: 15, display: "block" }}>{item.label}</strong>
+                                <span style={{ fontSize: 12, color: "var(--mw-muted)" }}>{item.desc}</span>
+                            </div>
+                            <span className="status-badge neutral">Explore →</span>
+                        </Link>
+                    ))}
+                </div>
+            </section>
+
+            {/* Popular Care Products with Images */}
             <section style={{ marginBottom: 32 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
                     <h2 style={{ fontSize: 22 }}>Popular Wellness &amp; Care Products</h2>
@@ -332,6 +387,13 @@ export default function Home() {
                         {storeProducts.map((prod) => (
                             <article key={prod._id} className="card-compact" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 10 }}>
                                 <div>
+                                    <SmartImage
+                                        src={prod.imageUrl}
+                                        fallbackSrc="/images/products/wellness-default.svg"
+                                        alt={prod.name}
+                                        height={130}
+                                        style={{ marginBottom: 10 }}
+                                    />
                                     <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
                                         <span className="status-badge neutral">{prod.category}</span>
                                         <span style={{ fontSize: 12, fontWeight: 700, color: "var(--mw-teal)" }}>★ {prod.rating || 4.7}</span>
@@ -374,8 +436,8 @@ export default function Home() {
                 </section>
             )}
 
-            {/* Featured Medicines */}
-            <section style={{ marginBottom: 24 }}>
+            {/* Featured Medicines with Images */}
+            <section style={{ marginBottom: 32 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
                     <h2 style={{ fontSize: 22 }}>Featured Medicines &amp; Reference Catalog</h2>
                     <Link to="/catalog" className="btn btn-secondary btn-sm">
@@ -396,9 +458,16 @@ export default function Home() {
                         {medicines.map((med) => (
                             <article className="card-compact" key={med._id} style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 10 }}>
                                 <div>
+                                    <SmartImage
+                                        src={med.imageUrl}
+                                        fallbackSrc="/images/meds/tablet.svg"
+                                        alt={med.name}
+                                        height={120}
+                                        style={{ marginBottom: 10 }}
+                                    />
                                     <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 8 }}>
                                         <span className="status-badge neutral">{med.category}</span>
-                                        <StatusBadge status="verified" label="Verified" />
+                                        <StatusBadge status="verified" label={med.prescriptionStatus || "Verified"} />
                                     </div>
                                     <h3 style={{ fontSize: 17, marginBottom: 4 }}>{med.name}</h3>
                                     <p style={{ fontSize: 13, color: "var(--mw-muted)" }}>
@@ -407,16 +476,60 @@ export default function Home() {
                                 </div>
                                 <div>
                                     <div style={{ fontSize: 20, fontWeight: 800, color: "var(--mw-teal)", marginBottom: 8 }}>
-                                        ₹{med.mrp} <small style={{ fontSize: 12, fontWeight: 500, color: "var(--mw-muted)" }}>MRP</small>
+                                        ₹{med.mrp} <small style={{ fontSize: 12, fontWeight: 500, color: "var(--mw-muted)" }}>MRP · {med.packSize || "Standard Pack"}</small>
                                     </div>
                                     <Link to={`/catalog?q=${encodeURIComponent(med.name)}`} className="btn btn-outline btn-sm" style={{ width: "100%" }}>
-                                        {t(language, "comparePrices")}
+                                        {t(language, "comparePrices")} &amp; Monograph
                                     </Link>
                                 </div>
                             </article>
                         ))}
                     </div>
                 )}
+            </section>
+
+            {/* Live OpenFDA Drug Recall Safety Feed */}
+            {liveRecalls.length > 0 && (
+                <section className="card" style={{ marginBottom: 24 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+                        <div>
+                            <h2 style={{ fontSize: 19 }}>Live FDA Drug Enforcement &amp; Safety Alerts</h2>
+                            <p style={{ fontSize: 12, color: "var(--mw-muted)" }}>
+                                Streamed from OpenFDA Drug Enforcement API for pharmacovigilance awareness.
+                            </p>
+                        </div>
+                        <Link to="/catalog" className="btn btn-outline btn-sm">Open Safety Checker →</Link>
+                    </div>
+                    <div className="grid-3">
+                        {liveRecalls.map((rec, i) => (
+                            <div key={rec.recallNumber || i} className="card-compact" style={{ background: "#FFFBEB", borderColor: "#FDE68A" }}>
+                                <div style={{ display: "flex", justifyContent: "space-between", gap: 6, marginBottom: 6 }}>
+                                    <StatusBadge status="pending" label={rec.classification} />
+                                    <small style={{ color: "var(--mw-muted)" }}>{rec.reportDate}</small>
+                                </div>
+                                <strong style={{ fontSize: 13, display: "block", marginBottom: 4 }}>{rec.recallingFirm}</strong>
+                                <p style={{ fontSize: 12, color: "var(--mw-navy)" }}>{rec.productDescription}</p>
+                                <p style={{ fontSize: 11, color: "var(--mw-amber)", marginTop: 4 }}>Reason: {rec.reasonForRecall}</p>
+                            </div>
+                        ))}
+                    </div>
+                </section>
+            )}
+
+            {/* Payment & Compliance Trust Bar */}
+            <section className="card-compact" style={{ marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
+                <div style={{ fontSize: 13 }}>
+                    <strong>Supported Payment Methods &amp; Standards:</strong>
+                    <span style={{ color: "var(--mw-muted)", marginLeft: 8 }}>UPI QR, GPay, PhonePe, Visa, Mastercard, RuPay, NetBanking &amp; COD</span>
+                </div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                    <img src="/images/payments/upi.svg" alt="UPI" height="24" />
+                    <img src="/images/payments/gpay.svg" alt="GPay" height="24" />
+                    <img src="/images/payments/visa.svg" alt="Visa" height="24" />
+                    <img src="/images/payments/mastercard.svg" alt="Mastercard" height="24" />
+                    <img src="/images/payments/rupay.svg" alt="RuPay" height="24" />
+                    <img src="/images/payments/cod.svg" alt="COD" height="24" />
+                </div>
             </section>
 
             <div className="alert-box info" role="note">

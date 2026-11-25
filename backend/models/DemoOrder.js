@@ -43,11 +43,24 @@ const demoOrderSchema = new mongoose.Schema(
         items: { type: [orderItemSchema], required: true },
         costBreakdown: {
             subtotal: { type: Number, required: true },
+            discountAmount: { type: Number, default: 0 },
             serviceFee: { type: Number, required: true },
             taxAmount: { type: Number, required: true },
             totalAmount: { type: Number, required: true }
         },
+        couponCode: { type: String, default: "" },
         serviceArea: { type: String, required: true, trim: true },
+        deliveryDetails: {
+            recipientName: { type: String, default: "" },
+            phone: { type: String, default: "" },
+            addressLine: { type: String, default: "" },
+            city: { type: String, default: "" },
+            pinCode: { type: String, default: "" },
+            lat: { type: Number, default: null },
+            lng: { type: Number, default: null },
+            instructions: { type: String, default: "" }
+        },
+        deliveryOtp: { type: String, default: "" },
         cancellationPolicy: {
             type: String,
             default: "Free cancellation in draft, submitted, or accepted stages before dispatch."
@@ -72,8 +85,17 @@ const demoOrderSchema = new mongoose.Schema(
         },
         paymentStatus: {
             type: String,
-            enum: ["pending", "authorized_sandbox", "paid_sandbox", "refunded_sandbox"],
+            enum: ["pending", "authorized_sandbox", "paid_sandbox", "paid_gateway", "cod_pending", "refunded_sandbox", "refunded"],
             default: "paid_sandbox"
+        },
+        paymentMethod: {
+            type: String,
+            default: "sandbox"
+        },
+        paymentTransaction: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "PaymentTransaction",
+            default: null
         },
         receiptNumber: { type: String, required: true },
         assignedCourier: { type: String, default: "Unassigned" },

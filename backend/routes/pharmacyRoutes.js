@@ -8,6 +8,7 @@ const AuditEvent = require("../models/AuditEvent");
 const { protect, authorize } = require("../middleware/authMiddleware");
 const User = require("../models/User");
 const { recordAudit } = require("../services/auditService");
+const { resolvePharmacyImage } = require("../services/mediaResolver");
 const eventBus = require("../services/eventBus");
 
 const validateDetails = (body = {}) => {
@@ -118,7 +119,10 @@ router.get("/", async (req, res) => {
             page: pageNum,
             totalPages: Math.max(1, Math.ceil(total / limitNum)),
             cities: cities.filter(Boolean).sort(),
-            data: pharmacies
+            data: pharmacies.map((p) => ({
+                ...p,
+                imageUrl: p.imageUrl || resolvePharmacyImage(p)
+            }))
         });
     } catch {
         res.status(500).json({

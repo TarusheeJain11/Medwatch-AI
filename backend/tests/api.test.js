@@ -14,6 +14,7 @@ const TrackingSession = require("../models/TrackingSession");
 const SupportTicket = require("../models/SupportTicket");
 const User = require("../models/User");
 const Pharmacy = require("../models/Pharmacy");
+const PaymentTransaction = require("../models/PaymentTransaction");
 
 describe("MedWatch AI Unit & Integration Suite", () => {
     let server;
@@ -22,6 +23,8 @@ describe("MedWatch AI Unit & Integration Suite", () => {
     let partnerCookie = "";
     let adminCookie = "";
     let createdOrderId = null;
+    let createdGatewayOrderId = null;
+    let createdTransactionId = null;
     let createdTicketId = null;
     let createdTestUserEmail = null;
     let createdPharmacyOwnerEmail = null;
@@ -70,6 +73,13 @@ describe("MedWatch AI Unit & Integration Suite", () => {
         if (createdOrderId) {
             await TrackingSession.deleteOne({ order: createdOrderId });
             await DemoOrder.deleteOne({ _id: createdOrderId });
+        }
+        if (createdGatewayOrderId) {
+            await TrackingSession.deleteOne({ order: createdGatewayOrderId });
+            await DemoOrder.deleteOne({ _id: createdGatewayOrderId });
+        }
+        if (createdTransactionId) {
+            await PaymentTransaction.deleteOne({ _id: createdTransactionId });
         }
         if (createdTicketId) {
             await SupportTicket.deleteOne({ _id: createdTicketId });
@@ -521,5 +531,84 @@ describe("MedWatch AI Unit & Integration Suite", () => {
         });
         assert.equal(ticket.status, 201);
         createdTicketId = ticket.data.data._id;
+    });
+
+    test("Payment Gateway, Live Monograph, Recalls, Telemetry & Admin/Customer APIs", async () => {
+        const cfg = await api("/api/payments/config");
+        assert.equal(cfg.status, 200);
+        assert.ok(Array.isArray(cfg.data.methods) && cfg.data.methods.length >= 5);
+
+        const coupon = await api("/api/payments/validate-coupon", {
+            method: "POST",
+            cookie: customerCookie,
+            body: { code: "MEDWATCH10", subtotal: 500 }
+        });
+        assert.equal(coupon.status, 200);
+        assert.equal(coupon.data.discountAmount, 50);
+
+        const [prods, pharms, meds] = await Promise.all([
+            api("/api/orders/demo-products?limit=2"),
+            api("/api/pharmacies?verifiedOnly=true&limit=1"),
+            api("/api/medicines?q=Vitamin&limit=1")
+        ]);
+        assert.ok(prods.data.data[0].imageUrl);
+        assert.ok(meds.data.data[0].imageUrl);
+
+        // Live monograph & live FDA recalls
+        const [mono, recalls, weather] = await Promise.all([
+            api(`/api/medicines/${meds.data.data[0]._id}/monograph`),
+            api("/api/medicines/recalls/live?limit=2"),
+            api("/api/live-weather?city=Jalandhar")
+        ]);
+        assert.equal(mono.status, 200);
+        assert.ok(mono.data.liveMonograph);
+        assert.equal(recalls.status, 200);
+        assert.equal(weather.status, 200);
+
+        // Create payment intent & verify via UPI
+        const intentRes = await api("/api/payments/create-intent", {
+            method: "POST",
+            cookie: customerCookie,
+            body: {
+                pharmacyId: pharms.data.data[0]._id,
+                items: [{ productId: prods.data.data[0]._id, quantity: 2 }],
+                couponCode: "MEDWATCH10",
+                idempotencyKey: `pg_${crypto.randomUUID()}`,
+                deliveryDetails: { serviceArea: "Civil Lines", city: "Jalandhar", pinCode: "144001" }
+            }
+        });
+        assert.equal(intentRes.status, 201);
+        assert.ok(intentRes.data.intent?.intentId);
+        createdTransactionId = intentRes.data.intent.intentId;
+
+        const completeRes = await api("/api/payments/verify-and-complete", {
+            method: "POST",
+            cookie: customerCookie,
+            body: {
+                intentId: createdTransactionId,
+                method: "upi",
+                upiVpa: "pilot.customer@okaxis"
+            }
+        });
+        assert.equal(completeRes.status, 201);
+        assert.equal(completeRes.data.data.paymentStatus, "paid_gateway");
+        createdGatewayOrderId = completeRes.data.data._id;
+
+        // Admin orders & payment ledger endpoints
+        const [admOrders, admPayments] = await Promise.all([
+            api("/api/orders/admin/all", { cookie: adminCookie }),
+            api("/api/payments/admin/all", { cookie: adminCookie })
+        ]);
+        assert.equal(admOrders.status, 200);
+        assert.equal(admPayments.status, 200);
+        assert.ok(admPayments.data.summary.capturedRevenue > 0);
+
+        // Refund via gateway
+        const refundRes = await api(`/api/payments/${createdGatewayOrderId}/refund`, {
+            method: "POST",
+            cookie: customerCookie
+        });
+        assert.equal(refundRes.status, 200);
+        assert.equal(refundRes.data.data.paymentStatus, "refunded");
     });
 });

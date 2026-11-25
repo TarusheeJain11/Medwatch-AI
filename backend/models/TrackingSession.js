@@ -41,6 +41,12 @@ const trackingSessionSchema = new mongoose.Schema(
             label: { type: String, required: true }
         },
         routeWaypoints: { type: [waypointSchema], default: [] },
+        routeGeometry: {
+            type: [{ lat: { type: Number }, lng: { type: Number } }],
+            default: []
+        },
+        distanceKm: { type: Number, default: 3.5 },
+        routingProvider: { type: String, default: "OpenStreetMap OSRM Live Routing" },
         waypointIndex: { type: Number, default: 0 },
         etaRangeText: { type: String, default: "18–24 mins" },
         delayNotice: { type: String, default: "" },

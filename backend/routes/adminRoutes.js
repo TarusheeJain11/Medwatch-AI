@@ -12,6 +12,7 @@ const SourceRecord = require("../models/SourceRecord");
 const FeatureFlag = require("../models/FeatureFlag");
 const PrivacyRequest = require("../models/PrivacyRequest");
 const Notification = require("../models/Notification");
+const PaymentTransaction = require("../models/PaymentTransaction");
 const { protect, authorize } = require("../middleware/authMiddleware");
 const { recordAudit } = require("../services/auditService");
 const { fetchOpenFdaDrugs } = require("../services/liveDataService");
@@ -46,8 +47,30 @@ router.get("/overview", async (req, res) => {
             SourceRecord.countDocuments({ status: { $in: ["failed", "dead_letter"] } })
         ]);
 
-        const totalTickets = await SupportTicket.countDocuments();
-        const resolvedTickets = await SupportTicket.countDocuments({ status: "resolved" });
+        const [totalTickets, resolvedTickets, allOrders, allPayments] = await Promise.all([
+            SupportTicket.countDocuments(),
+            SupportTicket.countDocuments({ status: "resolved" }),
+            DemoOrder.find().select("status paymentStatus costBreakdown.totalAmount").lean(),
+            PaymentTransaction.find().select("status method costBreakdown.totalAmount refundAmount").lean()
+        ]);
+
+        const statusBreakdown = {};
+        let grossOrderValue = 0;
+        for (const o of allOrders) {
+            statusBreakdown[o.status] = (statusBreakdown[o.status] || 0) + 1;
+            if (o.status !== "cancelled") {
+                grossOrderValue += o.costBreakdown?.totalAmount || 0;
+            }
+        }
+
+        const paymentBreakdown = {};
+        let capturedRevenue = 0;
+        let refundedAmount = 0;
+        for (const p of allPayments) {
+            paymentBreakdown[p.method] = (paymentBreakdown[p.method] || 0) + 1;
+            if (p.status === "captured") capturedRevenue += p.costBreakdown?.totalAmount || 0;
+            if (p.status === "refunded") refundedAmount += p.refundAmount || p.costBreakdown?.totalAmount || 0;
+        }
 
         res.status(200).json({
             success: true,
@@ -61,13 +84,19 @@ router.get("/overview", async (req, res) => {
                 deliveredOrders,
                 openTickets,
                 pendingPrivacy,
-                failedSources
+                failedSources,
+                grossOrderValue,
+                capturedRevenue,
+                refundedAmount,
+                totalTransactions: allPayments.length
             },
             analytics: {
                 orderCompletionRate:
                     totalOrders > 0 ? Math.round((deliveredOrders / totalOrders) * 100) : 0,
                 supportResolutionRate:
                     totalTickets > 0 ? Math.round((resolvedTickets / totalTickets) * 100) : 100,
+                statusBreakdown,
+                paymentBreakdown,
                 dataFreshnessNote: "All pilot catalog and operational records timestamped.",
                 deliveryEventLatencyTarget: "< 3 seconds via SSE"
             }

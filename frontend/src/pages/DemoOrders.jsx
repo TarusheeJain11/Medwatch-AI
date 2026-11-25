@@ -4,6 +4,9 @@ import { useAuth } from "../context/AuthContext";
 import { apiRequest } from "../services/api";
 import { StatusBadge, SkeletonCards } from "../components/StatusBadge";
 import TrackingMapPanel from "../components/TrackingMapPanel";
+import SmartImage from "../components/SmartImage";
+import PaymentGatewayModal from "../components/PaymentGatewayModal";
+import InvoiceModal from "../components/InvoiceModal";
 
 const PROGRESS_STEPS = [
     { key: "submitted", label: "Order Placed" },
@@ -15,6 +18,7 @@ const PROGRESS_STEPS = [
 
 export default function DemoOrders() {
     const {
+        user,
         isAuthenticated,
         liveEvents,
         cartItems,
@@ -37,22 +41,55 @@ export default function DemoOrders() {
     const [prodCategory, setProdCategory] = useState("all");
     const [prodSort, setProdSort] = useState("popular");
 
+    const [quickViewProd, setQuickViewProd] = useState(null);
     const [policy, setPolicy] = useState(null);
+    const [gatewayConfig, setGatewayConfig] = useState(null);
     const [pharmacies, setPharmacies] = useState([]);
     const [orders, setOrders] = useState([]);
     const [selectedOrder, setSelectedOrder] = useState(null);
+    const [invoiceOrder, setInvoiceOrder] = useState(null);
     const [tracking, setTracking] = useState(null);
     const [isStale, setIsStale] = useState(false);
 
     const [selectedPharmacy, setSelectedPharmacy] = useState(preferredPharmacyId || "");
+    const [recipientName, setRecipientName] = useState(user?.name || "");
+    const [phone, setPhone] = useState(user?.phone || "");
+    const [addressLine, setAddressLine] = useState("");
     const [serviceArea, setServiceArea] = useState("Model Town");
+    const [city, setCity] = useState(user?.preferences?.city || "Jalandhar");
+    const [pinCode, setPinCode] = useState("");
+    const [deliveryCoords, setDeliveryCoords] = useState(null);
+    const [addressSuggestions, setAddressSuggestions] = useState([]);
+    const [searchingAddr, setSearchingAddr] = useState(false);
+
+    const [couponInput, setCouponInput] = useState("");
+    const [appliedCoupon, setAppliedCoupon] = useState(null);
+    const [couponError, setCouponError] = useState("");
+
     const [idempotencyKey, setIdempotencyKey] = useState(() => `idem_${crypto.randomUUID()}`);
+    const [paymentIntent, setPaymentIntent] = useState(null);
+    const [isGatewayOpen, setIsGatewayOpen] = useState(false);
 
     const [loading, setLoading] = useState(true);
     const [submitting, setSubmitting] = useState(false);
     const [stepping, setStepping] = useState(false);
     const [feedback, setFeedback] = useState({ type: "", message: "" });
     const [disputeReason, setDisputeReason] = useState("");
+
+    useEffect(() => {
+        if (user) {
+            if (!recipientName) setRecipientName(user.name || "");
+            if (!phone && user.phone) setPhone(user.phone);
+            const defAddr = (user.savedAddresses || []).find((a) => a.isDefault) || user.savedAddresses?.[0];
+            if (defAddr && !addressLine) {
+                setAddressLine(defAddr.addressLine || "");
+                setServiceArea(defAddr.locality || defAddr.city || "Model Town");
+                setCity(defAddr.city || "Jalandhar");
+                setPinCode(defAddr.pinCode || "");
+                if (defAddr.lat && defAddr.lng) setDeliveryCoords({ lat: defAddr.lat, lng: defAddr.lng });
+            }
+        }
+    }, [user]);
 
     const loadProducts = useCallback(async (qVal = prodQuery, catVal = prodCategory, sortVal = prodSort, pageVal = prodPage) => {
         const params = new URLSearchParams();
@@ -75,11 +112,13 @@ export default function DemoOrders() {
     const loadInitial = useCallback(async () => {
         setLoading(true);
         try {
-            const [, pharmRes] = await Promise.all([
+            const [, pharmRes, pgRes] = await Promise.all([
                 loadProducts(prodQuery, prodCategory, prodSort, prodPage),
-                apiRequest("/pharmacies?verifiedOnly=true&limit=40", { cacheKey: "checkout_pharms" })
+                apiRequest("/pharmacies?verifiedOnly=true&limit=40", { cacheKey: "checkout_pharms" }),
+                apiRequest("/payments/config", { cacheKey: "pg_config" }).catch(() => null)
             ]);
 
+            if (pgRes) setGatewayConfig(pgRes);
             const phList = pharmRes.data || [];
             setPharmacies(phList);
             if (preferredPharmacyId && phList.some((p) => p._id === preferredPharmacyId)) {
@@ -139,7 +178,6 @@ export default function DemoOrders() {
         }
     }, [location.hash]);
 
-    // Real-time SSE updates for orders & courier movement (process ALL newly arrived events)
     useEffect(() => {
         if (!liveEvents.length) return;
         for (const evt of liveEvents) {
@@ -193,13 +231,79 @@ export default function DemoOrders() {
 
     const getCartQty = (productId) => cartItems.find((i) => i.product._id === productId)?.quantity || 0;
     const subtotal = cartItems.reduce((sum, item) => sum + item.product.unitPrice * item.quantity, 0);
+    const discountAmount = appliedCoupon ? Math.min(subtotal, appliedCoupon.discountAmount || 0) : 0;
+    const discountedSubtotal = Math.max(0, subtotal - discountAmount);
     const serviceFee = cartItems.length > 0 ? (policy?.serviceFee || 25) : 0;
-    const taxAmount = Math.round(subtotal * ((policy?.taxRatePercent || 5) / 100));
-    const totalAmount = subtotal + serviceFee + taxAmount;
+    const taxAmount = Math.round(discountedSubtotal * ((policy?.taxRatePercent || 5) / 100));
+    const totalAmount = discountedSubtotal + serviceFee + taxAmount;
 
-    const placeOrder = async (submitImmediately = true) => {
+    const searchNominatimAddress = async () => {
+        const term = `${addressLine} ${city}`.trim();
+        if (term.length < 2) return;
+        setSearchingAddr(true);
+        try {
+            const res = await apiRequest(`/location/search?q=${encodeURIComponent(term)}`);
+            setAddressSuggestions(res.data || []);
+        } catch {
+            setAddressSuggestions([]);
+        } finally {
+            setSearchingAddr(false);
+        }
+    };
+
+    const useOptionalAreaLocation = () => {
+        if (!navigator.geolocation) {
+            setFeedback({ type: "info", message: "Location unavailable; enter your area manually." });
+            return;
+        }
+        navigator.geolocation.getCurrentPosition(
+            async (pos) => {
+                const lat = pos.coords.latitude;
+                const lng = pos.coords.longitude;
+                setDeliveryCoords({ lat, lng });
+                try {
+                    const geo = await apiRequest(`/location/reverse?lat=${lat}&lng=${lng}`);
+                    if (geo?.data) {
+                        setAddressLine(geo.data.displayName || "");
+                        setServiceArea(geo.data.locality || geo.data.city || "Verified Locality");
+                        if (geo.data.city) setCity(geo.data.city);
+                        if (geo.data.pinCode) setPinCode(geo.data.pinCode);
+                        setFeedback({ type: "success", message: `GPS address resolved via OpenStreetMap: ${geo.data.locality || geo.data.city}` });
+                        return;
+                    }
+                } catch {
+                    // fallback
+                }
+                setServiceArea("Current Locality (GPS Verified)");
+                setFeedback({ type: "success", message: "Delivery coordinates updated." });
+            },
+            () => {
+                setFeedback({ type: "info", message: "Location permission declined; manual address active." });
+            }
+        );
+    };
+
+    const applyCoupon = async () => {
+        setCouponError("");
         if (!isAuthenticated) {
-            setFeedback({ type: "warning", message: "Please sign in to place your order and watch live tracking." });
+            setCouponError("Sign in to validate promo coupons.");
+            return;
+        }
+        try {
+            const res = await apiRequest("/payments/validate-coupon", {
+                method: "POST",
+                body: { code: couponInput, subtotal }
+            });
+            setAppliedCoupon(res);
+        } catch (err) {
+            setAppliedCoupon(null);
+            setCouponError(err.message);
+        }
+    };
+
+    const openPaymentGateway = async () => {
+        if (!isAuthenticated) {
+            setFeedback({ type: "warning", message: "Please sign in to proceed with checkout and live tracking." });
             return;
         }
         if (cartItems.length === 0) {
@@ -209,6 +313,65 @@ export default function DemoOrders() {
         setSubmitting(true);
         setFeedback({ type: "", message: "" });
         try {
+            const res = await apiRequest("/payments/create-intent", {
+                method: "POST",
+                body: {
+                    pharmacyId: selectedPharmacy,
+                    items: cartItems.map((c) => ({ productId: c.product._id, quantity: c.quantity })),
+                    serviceArea,
+                    couponCode: appliedCoupon?.code || "",
+                    idempotencyKey,
+                    deliveryDetails: {
+                        recipientName,
+                        phone,
+                        addressLine,
+                        serviceArea,
+                        city,
+                        pinCode,
+                        lat: deliveryCoords?.lat ?? null,
+                        lng: deliveryCoords?.lng ?? null
+                    }
+                }
+            });
+            if (res.alreadyCompleted && res.order) {
+                setSelectedOrder(res.order);
+                setActiveSection("orders");
+                return;
+            }
+            setPaymentIntent(res.intent);
+            setIsGatewayOpen(true);
+        } catch (err) {
+            setFeedback({ type: "error", message: err.message || "Could not launch payment gateway." });
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    const handlePaymentSuccess = (res) => {
+        setIsGatewayOpen(false);
+        setPaymentIntent(null);
+        setAppliedCoupon(null);
+        setCouponInput("");
+        clearCart();
+        setIdempotencyKey(`idem_${crypto.randomUUID()}`);
+
+        const order = res.data;
+        if (order) {
+            setOrders((prev) => (prev.some((o) => o._id === order._id) ? prev : [order, ...prev]));
+            setSelectedOrder(order);
+            setInvoiceOrder(order);
+        }
+        setActiveSection("orders");
+        setFeedback({
+            type: "success",
+            message: res.message || `Order ${order?.orderNumber} paid and live tracking started!`
+        });
+    };
+
+    const saveDraftOrder = async () => {
+        if (!isAuthenticated || cartItems.length === 0) return;
+        setSubmitting(true);
+        try {
             const res = await apiRequest("/orders", {
                 method: "POST",
                 body: {
@@ -216,20 +379,17 @@ export default function DemoOrders() {
                     items: cartItems.map((c) => ({ productId: c.product._id, quantity: c.quantity })),
                     serviceArea,
                     idempotencyKey,
-                    submitImmediately
+                    submitImmediately: false
                 }
-            });
-            setFeedback({
-                type: "success",
-                message: `Order ${res.data.orderNumber} placed! Live tracking is active below.`
             });
             clearCart();
             setIdempotencyKey(`idem_${crypto.randomUUID()}`);
-            setOrders((prev) => (prev.some((o) => o._id === res.data._id) ? prev : [res.data, ...prev]));
+            setOrders((prev) => [res.data, ...prev]);
             setSelectedOrder(res.data);
             setActiveSection("orders");
+            setFeedback({ type: "info", message: `Draft ${res.data.orderNumber} saved.` });
         } catch (err) {
-            setFeedback({ type: "error", message: err.message || "Could not place order." });
+            setFeedback({ type: "error", message: err.message });
         } finally {
             setSubmitting(false);
         }
@@ -241,6 +401,17 @@ export default function DemoOrders() {
                 method: "PATCH",
                 body: { nextStatus, note }
             });
+            setSelectedOrder((prev) => ({ ...prev, ...res.data, pharmacy: prev.pharmacy }));
+            setOrders((prev) => prev.map((o) => (o._id === orderId ? { ...o, ...res.data, pharmacy: o.pharmacy } : o)));
+            setFeedback({ type: "success", message: res.message });
+        } catch (err) {
+            setFeedback({ type: "error", message: err.message });
+        }
+    };
+
+    const requestGatewayRefund = async (orderId) => {
+        try {
+            const res = await apiRequest(`/payments/${orderId}/refund`, { method: "POST" });
             setSelectedOrder((prev) => ({ ...prev, ...res.data, pharmacy: prev.pharmacy }));
             setOrders((prev) => prev.map((o) => (o._id === orderId ? { ...o, ...res.data, pharmacy: o.pharmacy } : o)));
             setFeedback({ type: "success", message: res.message });
@@ -292,22 +463,6 @@ export default function DemoOrders() {
         }
     };
 
-    const useOptionalAreaLocation = () => {
-        if (!navigator.geolocation) {
-            setFeedback({ type: "info", message: "Location unavailable; enter your area manually." });
-            return;
-        }
-        navigator.geolocation.getCurrentPosition(
-            () => {
-                setServiceArea("Current Locality (Area Verified)");
-                setFeedback({ type: "success", message: "Delivery area updated." });
-            },
-            () => {
-                setFeedback({ type: "info", message: "Location permission declined; manual area active." });
-            }
-        );
-    };
-
     const activeStepIndex = selectedOrder
         ? PROGRESS_STEPS.findIndex((s) => s.key === selectedOrder.status)
         : -1;
@@ -316,9 +471,9 @@ export default function DemoOrders() {
         <div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12, marginBottom: 18 }}>
                 <div>
-                    <h1 style={{ fontSize: 28 }}>Wellness Store &amp; Live Order Tracker</h1>
+                    <h1 style={{ fontSize: 28 }}>Wellness Store, Checkout &amp; Live Order Tracker</h1>
                     <p style={{ color: "var(--mw-muted)", fontSize: 14 }}>
-                        Browse <strong>{prodTotal.toLocaleString()}</strong> healthcare kits &amp; monitors, check out in 1 click, and watch real-time OSRM road delivery updates.
+                        Browse <strong>{prodTotal.toLocaleString()}</strong> healthcare kits &amp; monitors, pay via UPI/Card/NetBanking/COD, and watch real-time OSRM road delivery.
                     </p>
                 </div>
                 <div style={{ display: "flex", gap: 8 }}>
@@ -382,19 +537,30 @@ export default function DemoOrders() {
                                     {products.map((prod) => {
                                         const qty = getCartQty(prod._id);
                                         return (
-                                            <div key={prod._id} className="card-compact" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+                                            <div key={prod._id} className="card-compact" style={{ display: "grid", gridTemplateColumns: "96px 1fr auto", alignItems: "center", gap: 12 }}>
+                                                <SmartImage
+                                                    src={prod.imageUrl}
+                                                    fallbackSrc="/images/products/wellness-default.svg"
+                                                    alt={prod.name}
+                                                    height={84}
+                                                />
                                                 <div>
-                                                    <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 4 }}>
+                                                    <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginBottom: 4 }}>
                                                         <span className="status-badge neutral">{prod.category}</span>
                                                         <span style={{ fontSize: 12, fontWeight: 700, color: "var(--mw-teal)" }}>★ {prod.rating || 4.7}</span>
                                                     </div>
                                                     <h3 style={{ fontSize: 16 }}>{prod.name}</h3>
                                                     <p style={{ fontSize: 12, color: "var(--mw-muted)" }}>{prod.brand} · {prod.description}</p>
-                                                    <div style={{ marginTop: 4 }}>
-                                                        <strong style={{ color: "var(--mw-teal)", fontSize: 17 }}>₹{prod.unitPrice}</strong>
-                                                        {prod.mrp > prod.unitPrice && (
-                                                            <small style={{ marginLeft: 6, textDecoration: "line-through", color: "var(--mw-muted)" }}>₹{prod.mrp}</small>
-                                                        )}
+                                                    <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 4 }}>
+                                                        <div>
+                                                            <strong style={{ color: "var(--mw-teal)", fontSize: 17 }}>₹{prod.unitPrice}</strong>
+                                                            {prod.mrp > prod.unitPrice && (
+                                                                <small style={{ marginLeft: 6, textDecoration: "line-through", color: "var(--mw-muted)" }}>₹{prod.mrp}</small>
+                                                            )}
+                                                        </div>
+                                                        <button type="button" className="btn btn-outline btn-sm" style={{ padding: "2px 8px", fontSize: 11 }} onClick={() => setQuickViewProd(prod)}>
+                                                            Specs
+                                                        </button>
                                                     </div>
                                                 </div>
                                                 {qty === 0 ? (
@@ -425,7 +591,7 @@ export default function DemoOrders() {
                             {/* Sticky Cart & Checkout */}
                             <section id="checkout" className="card" style={{ position: "sticky", top: 80 }}>
                                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-                                    <h2 style={{ fontSize: 20 }}>Your Cart &amp; Checkout</h2>
+                                    <h2 style={{ fontSize: 20 }}>Cart &amp; Payment Checkout</h2>
                                     {cartItems.length > 0 && (
                                         <button type="button" className="btn btn-outline btn-sm" onClick={clearCart}>Clear</button>
                                     )}
@@ -453,7 +619,7 @@ export default function DemoOrders() {
                                     </div>
                                 )}
 
-                                <div className="form-grid">
+                                <div className="form-grid" style={{ gap: 12 }}>
                                     <div className="field">
                                         <label htmlFor="demoPharmacy">Dispatching Pharmacy</label>
                                         <select id="demoPharmacy" value={selectedPharmacy} onChange={(e) => setSelectedPharmacy(e.target.value)}>
@@ -465,18 +631,104 @@ export default function DemoOrders() {
                                         </select>
                                     </div>
 
-                                    <div className="field">
-                                        <label htmlFor="serviceArea">Delivery Locality / Area</label>
-                                        <div style={{ display: "flex", gap: 8 }}>
-                                            <input id="serviceArea" type="text" value={serviceArea} onChange={(e) => setServiceArea(e.target.value)} />
-                                            <button type="button" className="btn btn-outline btn-sm" onClick={useOptionalAreaLocation}>Detect</button>
+                                    <div className="grid-2">
+                                        <div className="field">
+                                            <label htmlFor="recName">Recipient Name</label>
+                                            <input id="recName" type="text" value={recipientName} onChange={(e) => setRecipientName(e.target.value)} placeholder="Full name" />
                                         </div>
+                                        <div className="field">
+                                            <label htmlFor="recPhone">Contact Phone</label>
+                                            <input id="recPhone" type="text" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+91-98..." />
+                                        </div>
+                                    </div>
+
+                                    <div className="field">
+                                        <label htmlFor="addrLine">Delivery Street Address (OpenStreetMap Nominatim)</label>
+                                        <div style={{ display: "flex", gap: 6 }}>
+                                            <input
+                                                id="addrLine"
+                                                type="text"
+                                                value={addressLine}
+                                                onChange={(e) => setAddressLine(e.target.value)}
+                                                placeholder="House / Street / Landmark..."
+                                            />
+                                            <button type="button" className="btn btn-outline btn-sm" onClick={searchNominatimAddress} disabled={searchingAddr}>
+                                                {searchingAddr ? "..." : "Find"}
+                                            </button>
+                                            <button type="button" className="btn btn-outline btn-sm" onClick={useOptionalAreaLocation}>
+                                                GPS
+                                            </button>
+                                        </div>
+                                        {addressSuggestions.length > 0 && (
+                                            <div className="card-compact" style={{ padding: 6, marginTop: 4, display: "grid", gap: 4 }}>
+                                                {addressSuggestions.map((s, idx) => (
+                                                    <button
+                                                        key={idx}
+                                                        type="button"
+                                                        style={{ textAlign: "left", fontSize: 12, padding: "4px 6px", borderRadius: 6 }}
+                                                        onClick={() => {
+                                                            setAddressLine(s.displayName);
+                                                            setServiceArea(s.locality || s.city || "Selected Area");
+                                                            if (s.city) setCity(s.city);
+                                                            if (s.pinCode) setPinCode(s.pinCode);
+                                                            setDeliveryCoords({ lat: s.lat, lng: s.lng });
+                                                            setAddressSuggestions([]);
+                                                        }}
+                                                    >
+                                                        {s.displayName}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div className="grid-3">
+                                        <div className="field">
+                                            <label htmlFor="serviceArea">Locality</label>
+                                            <input id="serviceArea" type="text" value={serviceArea} onChange={(e) => setServiceArea(e.target.value)} />
+                                        </div>
+                                        <div className="field">
+                                            <label htmlFor="delCity">City</label>
+                                            <input id="delCity" type="text" value={city} onChange={(e) => setCity(e.target.value)} />
+                                        </div>
+                                        <div className="field">
+                                            <label htmlFor="delPin">PIN Code</label>
+                                            <input id="delPin" type="text" value={pinCode} onChange={(e) => setPinCode(e.target.value)} placeholder="144001" />
+                                        </div>
+                                    </div>
+
+                                    {/* Promo Coupon */}
+                                    <div className="field">
+                                        <label htmlFor="couponBox">Promo Coupon (Try MEDWATCH10, FIRSTCARE50, WELLNESS15)</label>
+                                        <div style={{ display: "flex", gap: 6 }}>
+                                            <input
+                                                id="couponBox"
+                                                type="text"
+                                                value={couponInput}
+                                                onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                                                placeholder="MEDWATCH10"
+                                            />
+                                            <button type="button" className="btn btn-secondary btn-sm" onClick={applyCoupon} disabled={!couponInput.trim() || subtotal === 0}>
+                                                Apply
+                                            </button>
+                                        </div>
+                                        {couponError && <small style={{ color: "var(--mw-red)" }}>{couponError}</small>}
+                                        {appliedCoupon && (
+                                            <small style={{ color: "var(--mw-success)", fontWeight: 600 }}>
+                                                Applied {appliedCoupon.code}: -₹{appliedCoupon.discountAmount} ({appliedCoupon.label})
+                                            </small>
+                                        )}
                                     </div>
 
                                     <div className="card-compact" style={{ background: "var(--mw-bg)" }}>
                                         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginBottom: 4 }}>
                                             <span>Subtotal</span><span>₹{subtotal}</span>
                                         </div>
+                                        {discountAmount > 0 && (
+                                            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginBottom: 4, color: "var(--mw-success)" }}>
+                                                <span>Coupon Discount</span><span>-₹{discountAmount}</span>
+                                            </div>
+                                        )}
                                         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginBottom: 4 }}>
                                             <span>Delivery Fee</span><span>₹{serviceFee}</span>
                                         </div>
@@ -484,17 +736,21 @@ export default function DemoOrders() {
                                             <span>GST ({policy?.taxRatePercent || 5}%)</span><span>₹{taxAmount}</span>
                                         </div>
                                         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 17, fontWeight: 800, borderTop: "1px solid var(--mw-border)", paddingTop: 8 }}>
-                                            <span>Total</span>
+                                            <span>Payable Total</span>
                                             <span style={{ color: "var(--mw-teal)" }}>₹{totalAmount}</span>
                                         </div>
-                                        <p style={{ fontSize: 11, color: "var(--mw-muted)", marginTop: 6 }}>
-                                            {policy?.cancellationPolicy}
-                                        </p>
+                                        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 8 }}>
+                                            <img src="/images/payments/upi.svg" alt="UPI" height="20" />
+                                            <img src="/images/payments/visa.svg" alt="Visa" height="20" />
+                                            <img src="/images/payments/mastercard.svg" alt="Mastercard" height="20" />
+                                            <img src="/images/payments/rupay.svg" alt="RuPay" height="20" />
+                                            <img src="/images/payments/cod.svg" alt="COD" height="20" />
+                                        </div>
                                     </div>
 
                                     {!isAuthenticated ? (
                                         <Link to="/login" className="btn btn-primary">
-                                            Sign In to Place Order
+                                            Sign In to Pay &amp; Place Order
                                         </Link>
                                     ) : (
                                         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -503,15 +759,15 @@ export default function DemoOrders() {
                                                 className="btn btn-primary"
                                                 style={{ flex: 1 }}
                                                 disabled={submitting || cartItems.length === 0}
-                                                onClick={() => placeOrder(true)}
+                                                onClick={openPaymentGateway}
                                             >
-                                                {submitting ? "Placing Order..." : "Place Order & Track Live"}
+                                                {submitting ? "Opening Gateway..." : `Pay ₹${totalAmount} & Order →`}
                                             </button>
                                             <button
                                                 type="button"
                                                 className="btn btn-outline"
                                                 disabled={submitting || cartItems.length === 0}
-                                                onClick={() => placeOrder(false)}
+                                                onClick={saveDraftOrder}
                                             >
                                                 Save Draft
                                             </button>
@@ -527,7 +783,7 @@ export default function DemoOrders() {
                             <div className="card" style={{ textAlign: "center", padding: 36 }}>
                                 <h2>Sign in to view &amp; track your live orders</h2>
                                 <p style={{ color: "var(--mw-muted)", margin: "8px 0 16px" }}>
-                                    Your real-time order updates and live courier route map appear here automatically.
+                                    Your real-time order updates, GST invoices, and live courier route map appear here automatically.
                                 </p>
                                 <Link to="/login" className="btn btn-primary">Sign In</Link>
                             </div>
@@ -561,7 +817,7 @@ export default function DemoOrders() {
                                                         <StatusBadge status={ord.status} />
                                                     </div>
                                                     <p style={{ fontSize: 13, color: "var(--mw-muted)", marginTop: 4 }}>
-                                                        {ord.pharmacy?.name || "Pharmacy"} · Total ₹{ord.costBreakdown?.totalAmount} · {new Date(ord.createdAt).toLocaleTimeString()}
+                                                        {ord.pharmacy?.name || "Pharmacy"} · Total ₹{ord.costBreakdown?.totalAmount} · {ord.paymentMethod || ord.paymentStatus}
                                                     </p>
                                                 </button>
                                             ))}
@@ -575,13 +831,21 @@ export default function DemoOrders() {
                                             <div>
                                                 <h2 style={{ fontSize: 20 }}>Order {selectedOrder.orderNumber}</h2>
                                                 <p style={{ fontSize: 13, color: "var(--mw-muted)" }}>
-                                                    Receipt: {selectedOrder.receiptNumber} · Courier: <strong>{selectedOrder.assignedCourier || "Assigning..."}</strong>
+                                                    Receipt: {selectedOrder.receiptNumber} · Payment: <strong>{selectedOrder.paymentStatus}</strong>
+                                                    {selectedOrder.deliveryOtp ? ` · Handoff OTP: ${selectedOrder.deliveryOtp}` : ""}
+                                                </p>
+                                                <p style={{ fontSize: 12, color: "var(--mw-muted)" }}>
+                                                    Courier: <strong>{selectedOrder.assignedCourier || "Assigning..."}</strong> · Method: {selectedOrder.paymentMethod || "Gateway"}
                                                 </p>
                                             </div>
-                                            <StatusBadge status={selectedOrder.status} />
+                                            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                                                <button type="button" className="btn btn-outline btn-sm" onClick={() => setInvoiceOrder(selectedOrder)}>
+                                                    Tax Invoice
+                                                </button>
+                                                <StatusBadge status={selectedOrder.status} />
+                                            </div>
                                         </div>
 
-                                        {/* Visual Customer Progress Stepper */}
                                         {!["cancelled", "failed", "returned"].includes(selectedOrder.status) && (
                                             <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 6, textAlign: "center" }}>
                                                 {PROGRESS_STEPS.map((step, i) => {
@@ -605,7 +869,12 @@ export default function DemoOrders() {
                                             )}
                                             {["draft", "submitted", "accepted"].includes(selectedOrder.status) && (
                                                 <button type="button" className="btn btn-danger btn-sm" onClick={() => transitionOrder(selectedOrder._id, "cancelled", "Cancelled before dispatch")}>
-                                                    Cancel Order (Free Refund)
+                                                    Cancel Order
+                                                </button>
+                                            )}
+                                            {["paid_sandbox", "paid_gateway"].includes(selectedOrder.paymentStatus) && ["submitted", "accepted", "cancelled"].includes(selectedOrder.status) && (
+                                                <button type="button" className="btn btn-outline btn-sm" onClick={() => requestGatewayRefund(selectedOrder._id)}>
+                                                    Instant Gateway Refund
                                                 </button>
                                             )}
                                         </div>
@@ -653,6 +922,61 @@ export default function DemoOrders() {
                     )}
                 </>
             )}
+
+            {/* Product Specs Quick-View Modal */}
+            {quickViewProd && (
+                <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label={quickViewProd.name}>
+                    <div className="modal-card" style={{ maxWidth: 520 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                            <span className="status-badge neutral">{quickViewProd.category}</span>
+                            <button type="button" className="btn btn-outline btn-sm" onClick={() => setQuickViewProd(null)}>Close ✕</button>
+                        </div>
+                        <SmartImage
+                            src={quickViewProd.imageUrl}
+                            fallbackSrc="/images/products/wellness-default.svg"
+                            alt={quickViewProd.name}
+                            height={180}
+                            style={{ marginBottom: 14 }}
+                        />
+                        <h2 style={{ fontSize: 20, marginBottom: 4 }}>{quickViewProd.name}</h2>
+                        <p style={{ fontSize: 13, color: "var(--mw-muted)", marginBottom: 10 }}>
+                            Brand: {quickViewProd.brand} · SKU: <code>{quickViewProd.sku}</code> · HSN: {quickViewProd.hsnCode || "9018"} · ★ {quickViewProd.rating || 4.7}
+                        </p>
+                        <p style={{ fontSize: 14, marginBottom: 12 }}>{quickViewProd.description}</p>
+                        {(quickViewProd.highlights || []).length > 0 && (
+                            <ul style={{ paddingLeft: 18, fontSize: 13, marginBottom: 14, display: "grid", gap: 4 }}>
+                                {quickViewProd.highlights.map((h, i) => <li key={i}>{h}</li>)}
+                            </ul>
+                        )}
+                        <p style={{ fontSize: 12, color: "var(--mw-muted)", marginBottom: 14 }}>
+                            Warranty / Policy: {quickViewProd.warrantyInfo || "6-Month Pilot Replacement Guarantee"}
+                        </p>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <strong style={{ fontSize: 24, color: "var(--mw-teal)" }}>₹{quickViewProd.unitPrice}</strong>
+                            <button
+                                type="button"
+                                className="btn btn-primary"
+                                onClick={() => {
+                                    addToCart(quickViewProd, 1);
+                                    setQuickViewProd(null);
+                                }}
+                            >
+                                + Add to Cart
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            <PaymentGatewayModal
+                isOpen={isGatewayOpen}
+                onClose={() => setIsGatewayOpen(false)}
+                intent={paymentIntent}
+                gatewayConfig={gatewayConfig}
+                onSuccess={handlePaymentSuccess}
+            />
+
+            <InvoiceModal order={invoiceOrder} onClose={() => setInvoiceOrder(null)} />
         </div>
     );
 }

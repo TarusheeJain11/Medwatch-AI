@@ -12,6 +12,7 @@ export default function PartnerDashboard() {
     const [pharmacies, setPharmacies] = useState([]);
     const [selectedPharmacyId, setSelectedPharmacyId] = useState("");
     const [medicines, setMedicines] = useState([]);
+    const [medFilter, setMedFilter] = useState("");
     const [prices, setPrices] = useState([]);
     const [orders, setOrders] = useState([]);
     const [reports, setReports] = useState(null);
@@ -69,7 +70,7 @@ export default function PartnerDashboard() {
         try {
             const [phRes, medRes, prRes, ordRes, repRes, insRes] = await Promise.all([
                 apiRequest("/pharmacies/my"),
-                apiRequest("/medicines"),
+                apiRequest("/medicines?limit=100"),
                 apiRequest("/prices/my"),
                 apiRequest("/orders/partner-queue"),
                 apiRequest("/prices/my/reports"),
@@ -511,7 +512,30 @@ export default function PartnerDashboard() {
                                     )}
                                     <form onSubmit={saveInventory} className="grid-2">
                                         <div className="field">
-                                            <label htmlFor="invMed">Catalog Item</label>
+                                            <label htmlFor="invMedSearch">Filter Catalog Medicines (Search 1,000+)</label>
+                                            <div style={{ display: "flex", gap: 6 }}>
+                                                <input
+                                                    id="invMedSearch"
+                                                    placeholder="Type medicine name..."
+                                                    value={medFilter}
+                                                    onChange={(e) => setMedFilter(e.target.value)}
+                                                />
+                                                <button
+                                                    type="button"
+                                                    className="btn btn-outline btn-sm"
+                                                    onClick={async () => {
+                                                        const res = await apiRequest(`/medicines?limit=100&q=${encodeURIComponent(medFilter.trim())}`);
+                                                        const list = res.data || [];
+                                                        setMedicines(list);
+                                                        if (list.length > 0) setInvForm((f) => ({ ...f, medicine: list[0]._id }));
+                                                    }}
+                                                >
+                                                    Search
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <div className="field">
+                                            <label htmlFor="invMed">Catalog Item ({medicines.length} loaded)</label>
                                             <select id="invMed" value={invForm.medicine} onChange={(e) => setInvForm({ ...invForm, medicine: e.target.value })}>
                                                 {medicines.map((m) => (
                                                     <option key={m._id} value={m._id}>{m.name} (Sample MRP ₹{m.mrp})</option>
@@ -663,7 +687,8 @@ export default function PartnerDashboard() {
                                                     <StatusBadge status={ord.status} />
                                                 </div>
                                                 <p style={{ fontSize: 13, color: "var(--mw-muted)", marginBottom: 10 }}>
-                                                    Items: {(ord.items || []).map((i) => `${i.name} x${i.quantity}`).join(", ")} · Total ₹{ord.costBreakdown?.totalAmount}
+                                                    Items: {(ord.items || []).map((i) => `${i.name} x${i.quantity}`).join(", ")} · Total ₹{ord.costBreakdown?.totalAmount} · Payment: <strong>{ord.paymentStatus}</strong> ({ord.paymentMethod || "Gateway"})
+                                                    {ord.deliveryDetails?.addressLine ? ` · Address: ${ord.deliveryDetails.addressLine}` : ""}
                                                 </p>
                                                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                                                     {ord.status === "submitted" && (

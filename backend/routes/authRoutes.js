@@ -110,6 +110,8 @@ const serializeUser = (u) => ({
         notificationsOptIn: true
     },
     preferences: u.preferences || { city: "Jalandhar", accessibilityNeeds: "" },
+    savedAddresses: u.savedAddresses || [],
+    savedMedicines: u.savedMedicines || [],
     lastLoginAt: u.lastLoginAt
 });
 
@@ -982,6 +984,96 @@ router.post("/revoke-sessions", protect, async (req, res) => {
         });
     } catch {
         res.status(500).json({ success: false, message: "Session revocation failed." });
+    }
+});
+
+// Saved Delivery Addresses
+router.get("/addresses", protect, async (req, res) => {
+    const user = await User.findById(req.user._id).select("savedAddresses").lean();
+    res.status(200).json({ success: true, data: user?.savedAddresses || [] });
+});
+
+router.post("/addresses", protect, async (req, res) => {
+    try {
+        const {
+            label = "Home",
+            recipientName = "",
+            phone = "",
+            addressLine = "",
+            locality = "",
+            city = "Jalandhar",
+            pinCode = "",
+            lat = null,
+            lng = null,
+            isDefault = false
+        } = req.body || {};
+
+        if (!String(addressLine).trim()) {
+            return res.status(400).json({ success: false, message: "Address line is required." });
+        }
+        const user = await User.findById(req.user._id);
+        if (!user) return res.status(404).json({ success: false, message: "User not found." });
+
+        if (isDefault || user.savedAddresses.length === 0) {
+            user.savedAddresses.forEach((a) => { a.isDefault = false; });
+        }
+        user.savedAddresses.push({
+            label: String(label).trim().slice(0, 30) || "Home",
+            recipientName: String(recipientName || user.name).trim().slice(0, 80),
+            phone: String(phone || user.phone || "").trim().slice(0, 20),
+            addressLine: String(addressLine).trim().slice(0, 200),
+            locality: String(locality).trim().slice(0, 100),
+            city: String(city).trim().slice(0, 80),
+            pinCode: String(pinCode).trim().slice(0, 10),
+            lat: typeof lat === "number" ? lat : null,
+            lng: typeof lng === "number" ? lng : null,
+            isDefault: Boolean(isDefault || user.savedAddresses.length === 0)
+        });
+        await user.save();
+        res.status(201).json({ success: true, data: user.savedAddresses, user: serializeUser(user) });
+    } catch {
+        res.status(500).json({ success: false, message: "Failed to save address." });
+    }
+});
+
+router.delete("/addresses/:addrId", protect, async (req, res) => {
+    try {
+        const user = await User.findByIdAndUpdate(
+            req.user._id,
+            { $pull: { savedAddresses: { _id: req.params.addrId } } },
+            { new: true }
+        );
+        res.status(200).json({ success: true, data: user?.savedAddresses || [], user: user ? serializeUser(user) : null });
+    } catch {
+        res.status(500).json({ success: false, message: "Failed to remove address." });
+    }
+});
+
+// Toggle Saved Medicine Bookmark
+router.get("/saved-medicines", protect, async (req, res) => {
+    const user = await User.findById(req.user._id)
+        .populate("savedMedicines", "name genericName manufacturer category mrp dosage imageUrl")
+        .lean();
+    res.status(200).json({ success: true, data: user?.savedMedicines || [] });
+});
+
+router.post("/saved-medicines/:medId", protect, async (req, res) => {
+    try {
+        const user = await User.findById(req.user._id);
+        if (!user) return res.status(404).json({ success: false, message: "User not found." });
+        const medId = String(req.params.medId);
+        const idx = user.savedMedicines.findIndex((id) => String(id) === medId);
+        let saved = false;
+        if (idx >= 0) {
+            user.savedMedicines.splice(idx, 1);
+        } else {
+            user.savedMedicines.push(medId);
+            saved = true;
+        }
+        await user.save();
+        res.status(200).json({ success: true, saved, savedMedicines: user.savedMedicines, user: serializeUser(user) });
+    } catch {
+        res.status(500).json({ success: false, message: "Failed to update saved medicine." });
     }
 });
 

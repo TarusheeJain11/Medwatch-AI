@@ -67,6 +67,12 @@ const pharmacySchema = new mongoose.Schema(
             type: [String],
             default: ["Step-free entrance", "Printed large-font labels"]
         },
+        imageUrl: { type: String, default: "/images/pharmacy-verified.svg" },
+        servicesOffered: {
+            type: [String],
+            default: ["Home Delivery", "Digital Invoices", "Pharmacist Counseling"]
+        },
+        deliveryEtaText: { type: String, default: "20–30 mins" },
         serviceArea: { type: String, default: "Central Sector" },
         licenseNumber: { type: String, default: "", trim: true },
         licenseExpiry: { type: Date, default: null },

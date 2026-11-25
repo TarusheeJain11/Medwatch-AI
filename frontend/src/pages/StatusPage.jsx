@@ -123,14 +123,19 @@ export default function StatusPage() {
                                             <td>Latency: {services.medicineReferenceApi?.openFda?.latencyMs} ms</td>
                                         </tr>
                                         <tr>
+                                            <td><strong>OpenFDA Drug Labeling &amp; Recalls API</strong></td>
+                                            <td><StatusBadge status={probeBadgeStatus(services.medicineReferenceApi?.openFdaLabel?.status)} label={services.medicineReferenceApi?.openFdaLabel?.status || "operational"} /></td>
+                                            <td>Label: {services.medicineReferenceApi?.openFdaLabel?.latencyMs ?? "—"} ms · Recalls: {services.medicineReferenceApi?.openFdaRecalls?.latencyMs ?? "—"} ms</td>
+                                        </tr>
+                                        <tr>
                                             <td><strong>NIH ClinicalTables RxTerms API</strong></td>
                                             <td><StatusBadge status={probeBadgeStatus(services.medicineReferenceApi?.nihRxTerms?.status)} label={services.medicineReferenceApi?.nihRxTerms?.status} /></td>
                                             <td>Latency: {services.medicineReferenceApi?.nihRxTerms?.latencyMs} ms</td>
                                         </tr>
                                         <tr>
-                                            <td><strong>OpenStreetMap OSRM Routing API</strong></td>
+                                            <td><strong>OpenStreetMap OSRM &amp; Nominatim APIs</strong></td>
                                             <td><StatusBadge status={probeBadgeStatus(services.routingService?.status)} label={services.routingService?.status} /></td>
-                                            <td>Latency: {services.routingService?.latencyMs} ms</td>
+                                            <td>OSRM: {services.routingService?.latencyMs} ms · Nominatim: {services.geocodingService?.latencyMs ?? "—"} ms</td>
                                         </tr>
                                         <tr>
                                             <td><strong>Pharmacy Directory Service</strong></td>

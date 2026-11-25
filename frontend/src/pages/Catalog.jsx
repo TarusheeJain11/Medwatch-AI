@@ -1,9 +1,12 @@
 import { useEffect, useState, useCallback } from "react";
 import { useSearchParams, Link } from "react-router-dom";
+import { useAuth } from "../context/AuthContext";
 import { apiRequest } from "../services/api";
 import { StatusBadge, SkeletonCards } from "../components/StatusBadge";
+import SmartImage from "../components/SmartImage";
 
 export default function Catalog() {
+    const { isAuthenticated, isAdmin, user, setUser } = useAuth();
     const [searchParams, setSearchParams] = useSearchParams();
     const [q, setQ] = useState(searchParams.get("q") || "");
     const [category, setCategory] = useState(searchParams.get("category") || "all");
@@ -21,14 +24,20 @@ export default function Catalog() {
 
     const [liveData, setLiveData] = useState(null);
     const [liveLoading, setLiveLoading] = useState(false);
+    const [liveRecalls, setLiveRecalls] = useState(null);
 
     const [selectedMed, setSelectedMed] = useState(null);
+    const [monograph, setMonograph] = useState(null);
+    const [monographTab, setMonographTab] = useState("overview");
     const [prices, setPrices] = useState([]);
     const [pricesLoading, setPricesLoading] = useState(false);
 
     const [correctionMed, setCorrectionMed] = useState(null);
     const [correctionText, setCorrectionText] = useState("");
     const [correctionStatus, setCorrectionStatus] = useState("");
+    const [toast, setToast] = useState("");
+
+    const savedSet = new Set((user?.savedMedicines || []).map((id) => String(id)));
 
     const fetchCatalog = useCallback(async (queryVal, catVal, sortVal, pageVal) => {
         setLoading(true);
@@ -83,19 +92,59 @@ export default function Catalog() {
         }
     };
 
+    const loadRecallsFeed = async () => {
+        try {
+            const res = await apiRequest(`/medicines/recalls/live?q=${encodeURIComponent(q.trim())}&limit=6`);
+            setLiveRecalls(res.data || []);
+        } catch (err) {
+            setError(err.message || "Could not fetch live FDA recalls.");
+        }
+    };
+
     const inspectMedicine = async (med) => {
         setSelectedMed(med);
+        setMonograph(null);
+        setMonographTab("overview");
         setPricesLoading(true);
         setPrices([]);
+
+        const [priceRes, monoRes] = await Promise.allSettled([
+            apiRequest(`/prices/compare/${med._id}`, { cacheKey: `compare_${med._id}` }),
+            apiRequest(`/medicines/${med._id}/monograph`)
+        ]);
+
+        if (priceRes.status === "fulfilled") {
+            setPrices(priceRes.value.data || []);
+        }
+        if (monoRes.status === "fulfilled") {
+            setMonograph(monoRes.value.liveMonograph || null);
+            if (monoRes.value.medicine) setSelectedMed(monoRes.value.medicine);
+        }
+        setPricesLoading(false);
+    };
+
+    const toggleSaveMedicine = async (medId) => {
+        if (!isAuthenticated) {
+            setToast("Sign in to bookmark medicines to your Health List.");
+            return;
+        }
         try {
-            const res = await apiRequest(`/prices/compare/${med._id}`, {
-                cacheKey: `compare_${med._id}`
-            });
-            setPrices(res.data || []);
-        } catch {
-            setPrices([]);
-        } finally {
-            setPricesLoading(false);
+            const res = await apiRequest(`/auth/saved-medicines/${medId}`, { method: "POST" });
+            if (res.user) setUser(res.user);
+            setToast(res.saved ? "Saved to your Health List!" : "Removed from your Health List.");
+            setTimeout(() => setToast(""), 2500);
+        } catch (err) {
+            setToast(err.message);
+        }
+    };
+
+    const importFdaItem = async (item) => {
+        try {
+            const res = await apiRequest("/medicines/import-live", { method: "POST", body: item });
+            setToast(res.message);
+            fetchCatalog(q, category, sort, page);
+        } catch (err) {
+            setToast(err.message);
         }
     };
 
@@ -124,18 +173,23 @@ export default function Catalog() {
         <div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 16, flexWrap: "wrap", marginBottom: 18 }}>
                 <div>
-                    <h1 style={{ fontSize: 28 }}>Medicines &amp; Price Comparison</h1>
+                    <h1 style={{ fontSize: 28 }}>Medicines, Live Monographs &amp; Price Comparison</h1>
                     <p style={{ color: "var(--mw-muted)", fontSize: 14 }}>
-                        Showing {medicines.length} of <strong>{total.toLocaleString()}</strong> OpenFDA &amp; curated medicines. Compare prices across verified pharmacies or query live FDA/NIH databases.
+                        Showing {medicines.length} of <strong>{total.toLocaleString()}</strong> OpenFDA &amp; curated medicines. Click any medicine for real-time FDA labels, NIH RxNav classes, chemical structures, and pharmacy prices.
                     </p>
                 </div>
-                <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                     <button type="button" className="btn btn-secondary btn-sm" onClick={runLiveLookup} disabled={liveLoading}>
                         {liveLoading ? "Querying Live APIs..." : "Live OpenFDA & NIH Lookup"}
+                    </button>
+                    <button type="button" className="btn btn-outline btn-sm" onClick={loadRecallsFeed}>
+                        Live FDA Recalls
                     </button>
                     <Link to="/help" className="btn btn-outline btn-sm">Ask Care AI</Link>
                 </div>
             </div>
+
+            {toast && <div className="alert-box info">{toast}</div>}
 
             {fromCache && (
                 <div className="alert-box warning">
@@ -192,6 +246,32 @@ export default function Catalog() {
                 )}
             </form>
 
+            {liveRecalls && (
+                <section className="card" style={{ marginBottom: 20, background: "#FFFBEB", borderColor: "#FDE68A" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                        <h2 style={{ fontSize: 18 }}>Live OpenFDA Drug Recall &amp; Enforcement Feed</h2>
+                        <button type="button" className="btn btn-outline btn-sm" onClick={() => setLiveRecalls(null)}>Close ✕</button>
+                    </div>
+                    {liveRecalls.length === 0 ? (
+                        <p style={{ fontSize: 13 }}>No recent FDA recall records matched that filter.</p>
+                    ) : (
+                        <div className="grid-3">
+                            {liveRecalls.map((rec, i) => (
+                                <div key={rec.recallNumber || i} className="card-compact" style={{ background: "#fff" }}>
+                                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                                        <StatusBadge status="pending" label={rec.classification} />
+                                        <small>{rec.reportDate}</small>
+                                    </div>
+                                    <strong style={{ fontSize: 13 }}>{rec.recallingFirm}</strong>
+                                    <p style={{ fontSize: 12, marginTop: 4 }}>{rec.productDescription}</p>
+                                    <p style={{ fontSize: 11, color: "var(--mw-amber)", marginTop: 4 }}>{rec.reasonForRecall}</p>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </section>
+            )}
+
             {liveData && (
                 <section className="card" style={{ marginBottom: 20, background: "#F4FAFA" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
@@ -209,11 +289,21 @@ export default function Catalog() {
                             {liveData.fdaResults.length === 0 ? (
                                 <p style={{ fontSize: 13, color: "var(--mw-muted)", marginTop: 6 }}>No direct OpenFDA brand match found.</p>
                             ) : (
-                                <ul style={{ paddingLeft: 18, fontSize: 13, marginTop: 6, display: "grid", gap: 4 }}>
+                                <div style={{ display: "grid", gap: 8, marginTop: 8 }}>
                                     {liveData.fdaResults.map((r, i) => (
-                                        <li key={i}><strong>{r.name}</strong> ({r.genericName}) — {r.manufacturer}</li>
+                                        <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, fontSize: 13, borderBottom: "1px solid #EEF4F5", paddingBottom: 6 }}>
+                                            <div>
+                                                <strong>{r.name}</strong> ({r.genericName})
+                                                <div style={{ fontSize: 11, color: "var(--mw-muted)" }}>{r.manufacturer} · {r.dosage}</div>
+                                            </div>
+                                            {isAdmin && (
+                                                <button type="button" className="btn btn-outline btn-sm" onClick={() => importFdaItem(r)}>
+                                                    + Import
+                                                </button>
+                                            )}
+                                        </div>
                                     ))}
-                                </ul>
+                                </div>
                             )}
                         </div>
                         <div className="card-compact">
@@ -262,39 +352,51 @@ export default function Catalog() {
             ) : (
                 <>
                     <div className="catalog-grid">
-                        {medicines.map((med) => (
-                            <article key={med._id} className="card-compact" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 10 }}>
-                                <div>
-                                    <div style={{ display: "flex", justifyContent: "space-between", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
-                                        <span className="status-badge neutral">{med.category}</span>
-                                        <StatusBadge status={med.editorialStatus || "verified"} label={med.sourceCitation?.includes("OpenFDA") ? "OpenFDA" : "Verified"} />
+                        {medicines.map((med) => {
+                            const isSaved = savedSet.has(String(med._id));
+                            return (
+                                <article key={med._id} className="card-compact" style={{ display: "flex", flexDirection: "column", justifyContent: "space-between", gap: 10 }}>
+                                    <div>
+                                        <SmartImage
+                                            src={med.imageUrl}
+                                            fallbackSrc="/images/meds/tablet.svg"
+                                            alt={med.name}
+                                            height={120}
+                                            style={{ marginBottom: 10 }}
+                                        />
+                                        <div style={{ display: "flex", justifyContent: "space-between", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+                                            <span className="status-badge neutral">{med.category}</span>
+                                            <StatusBadge status={med.editorialStatus || "verified"} label={med.prescriptionStatus || (med.sourceCitation?.includes("OpenFDA") ? "OpenFDA" : "Verified")} />
+                                        </div>
+                                        <h2 style={{ fontSize: 17, marginBottom: 4 }}>{med.name}</h2>
+                                        <p style={{ fontSize: 13, color: "var(--mw-muted)" }}>
+                                            Generic: <strong>{med.genericName || "N/A"}</strong> · {med.dosage || "Standard"}
+                                        </p>
+                                        <p style={{ fontSize: 12, color: "var(--mw-muted)", marginTop: 4 }}>
+                                            Mfr: {med.manufacturer || "N/A"} · {med.packSize || "Standard Pack"}
+                                        </p>
                                     </div>
-                                    <h2 style={{ fontSize: 17, marginBottom: 4 }}>{med.name}</h2>
-                                    <p style={{ fontSize: 13, color: "var(--mw-muted)" }}>
-                                        Generic: <strong>{med.genericName || "N/A"}</strong> · {med.dosage || "Standard"}
-                                    </p>
-                                    <p style={{ fontSize: 12, color: "var(--mw-muted)", marginTop: 4 }}>
-                                        Mfr: {med.manufacturer || "N/A"}
-                                    </p>
-                                </div>
-                                <div>
-                                    <div style={{ fontSize: 21, fontWeight: 800, color: "var(--mw-teal)", marginBottom: 8 }}>
-                                        ₹{med.mrp} <small style={{ fontSize: 12, fontWeight: 500, color: "var(--mw-muted)" }}>Reference MRP</small>
+                                    <div>
+                                        <div style={{ fontSize: 21, fontWeight: 800, color: "var(--mw-teal)", marginBottom: 8 }}>
+                                            ₹{med.mrp} <small style={{ fontSize: 12, fontWeight: 500, color: "var(--mw-muted)" }}>Reference MRP</small>
+                                        </div>
+                                        <div style={{ display: "flex", gap: 6 }}>
+                                            <button type="button" className="btn btn-primary btn-sm" style={{ flex: 1 }} onClick={() => inspectMedicine(med)}>
+                                                Details &amp; Prices
+                                            </button>
+                                            <button type="button" className="btn btn-outline btn-sm" onClick={() => toggleSaveMedicine(med._id)} title="Bookmark medicine">
+                                                {isSaved ? "★" : "☆"}
+                                            </button>
+                                            <button type="button" className="btn btn-outline btn-sm" onClick={() => { setCorrectionMed(med); setCorrectionStatus(""); }}>
+                                                Flag
+                                            </button>
+                                        </div>
                                     </div>
-                                    <div style={{ display: "flex", gap: 8 }}>
-                                        <button type="button" className="btn btn-primary btn-sm" style={{ flex: 1 }} onClick={() => inspectMedicine(med)}>
-                                            Compare Prices
-                                        </button>
-                                        <button type="button" className="btn btn-outline btn-sm" onClick={() => { setCorrectionMed(med); setCorrectionStatus(""); }}>
-                                            Flag
-                                        </button>
-                                    </div>
-                                </div>
-                            </article>
-                        ))}
+                                </article>
+                            );
+                        })}
                     </div>
 
-                    {/* Pagination Bar */}
                     {totalPages > 1 && (
                         <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 12, marginTop: 24 }}>
                             <button type="button" className="btn btn-outline btn-sm" disabled={page <= 1} onClick={() => setPage((p) => p - 1)}>
@@ -311,74 +413,209 @@ export default function Catalog() {
                 </>
             )}
 
-            {/* Medicine Detail & Price Comparison Drawer */}
+            {/* Medicine Live Monograph & Price Comparison Drawer */}
             {selectedMed && (
                 <section className="card" style={{ marginTop: 28 }} aria-live="polite">
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, marginBottom: 16 }}>
-                        <div>
-                            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
-                                <StatusBadge status="verified" label="Source Attributed" />
-                                <span className="status-badge neutral">{selectedMed.category}</span>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, flexWrap: "wrap", marginBottom: 16 }}>
+                        <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+                            <SmartImage
+                                src={monograph?.wiki?.thumbnailUrl || selectedMed.imageUrl}
+                                fallbackSrc="/images/meds/tablet.svg"
+                                alt={selectedMed.name}
+                                height={92}
+                                style={{ width: 120 }}
+                            />
+                            <div>
+                                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
+                                    <StatusBadge status="verified" label={selectedMed.prescriptionStatus || "Source Attributed"} />
+                                    <span className="status-badge neutral">{selectedMed.category}</span>
+                                    {monograph?.rxNav?.rxcui && (
+                                        <span className="status-badge neutral">RxCUI: {monograph.rxNav.rxcui}</span>
+                                    )}
+                                </div>
+                                <h2 style={{ fontSize: 22 }}>{selectedMed.name}</h2>
+                                <p style={{ color: "var(--mw-muted)", fontSize: 14 }}>
+                                    Generic: {selectedMed.genericName} · Manufacturer: {selectedMed.manufacturer} · {selectedMed.dosage} · HSN {selectedMed.hsnCode || "3004"}
+                                </p>
                             </div>
-                            <h2 style={{ fontSize: 22 }}>{selectedMed.name}</h2>
-                            <p style={{ color: "var(--mw-muted)", fontSize: 14 }}>
-                                Generic: {selectedMed.genericName} · Manufacturer: {selectedMed.manufacturer} · Form: {selectedMed.dosage}
-                            </p>
                         </div>
                         <button type="button" className="btn btn-outline btn-sm" onClick={() => setSelectedMed(null)}>
                             Close ✕
                         </button>
                     </div>
 
-                    <div className="grid-2" style={{ marginBottom: 20 }}>
-                        <div className="card-compact" style={{ background: "var(--mw-bg)" }}>
-                            <strong style={{ fontSize: 13 }}>Product Details &amp; Provenance</strong>
-                            <p style={{ fontSize: 13, marginTop: 6 }}>{selectedMed.description}</p>
-                            {selectedMed.activeIngredients && (
-                                <p style={{ fontSize: 12, color: "var(--mw-muted)", marginTop: 6 }}>
-                                    Active Ingredients: {selectedMed.activeIngredients}
-                                </p>
-                            )}
-                            <p style={{ fontSize: 12, color: "var(--mw-muted)", marginTop: 6 }}>
-                                Source: {selectedMed.sourceCitation} · Verified{" "}
-                                {new Date(selectedMed.sourceLastVerifiedAt || selectedMed.updatedAt).toLocaleDateString()}
-                            </p>
-                        </div>
-                        <div className="card-compact" style={{ background: "var(--mw-amber-bg)", borderColor: "var(--mw-amber-border)" }}>
-                            <strong style={{ fontSize: 13, color: "var(--mw-amber)" }}>Safety Information</strong>
-                            <p style={{ fontSize: 13, color: "var(--mw-amber)", marginTop: 6 }}>
-                                {selectedMed.warnings || "Educational information only. Consult a licensed doctor or pharmacist before use."}
-                            </p>
-                        </div>
+                    <div className="pill-tabs">
+                        {[
+                            { id: "overview", label: "Overview & Live Monograph" },
+                            { id: "safety", label: "Warnings, Side Effects & Interactions" },
+                            { id: "prices", label: `Pharmacy Prices (${prices.length})` }
+                        ].map((tb) => (
+                            <button
+                                key={tb.id}
+                                type="button"
+                                className={`pill-tab ${monographTab === tb.id ? "active" : ""}`}
+                                onClick={() => setMonographTab(tb.id)}
+                            >
+                                {tb.label}
+                            </button>
+                        ))}
                     </div>
 
-                    <h3 style={{ fontSize: 18, marginBottom: 12 }}>Pharmacy Price Comparison</h3>
-                    {pricesLoading ? (
-                        <SkeletonCards count={2} />
-                    ) : prices.length === 0 ? (
-                        <p style={{ color: "var(--mw-muted)" }}>No pharmacy price listings available for this record yet.</p>
-                    ) : (
-                        <div style={{ display: "grid", gap: 10 }}>
-                            {prices.map((p, idx) => (
-                                <div key={p._id} className="card-compact" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12, borderColor: idx === 0 ? "var(--mw-teal)" : undefined }}>
-                                    <div>
-                                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                                            <strong>{p.pharmacy?.name}</strong>
-                                            <StatusBadge status={p.pharmacy?.isVerified ? "verified" : "pending"} />
-                                            {idx === 0 && <span className="status-badge active">Best Price</span>}
-                                        </div>
-                                        <p style={{ fontSize: 13, color: "var(--mw-muted)", marginTop: 4 }}>
-                                            {p.pharmacy?.address}, {p.pharmacy?.city} · Stock: {p.stockQuantity ?? 25} units · Batch: {p.batchNumber || "Verified"}
+                    {monographTab === "overview" && (
+                        <div className="grid-2" style={{ alignItems: "start" }}>
+                            <div className="card-compact" style={{ background: "var(--mw-bg)", display: "grid", gap: 10 }}>
+                                <div>
+                                    <strong style={{ fontSize: 13 }}>Catalog &amp; Provenance</strong>
+                                    <p style={{ fontSize: 13, marginTop: 4 }}>{selectedMed.description}</p>
+                                    {selectedMed.activeIngredients && (
+                                        <p style={{ fontSize: 12, color: "var(--mw-muted)", marginTop: 4 }}>
+                                            <strong>Active Ingredients:</strong> {selectedMed.activeIngredients}
                                         </p>
+                                    )}
+                                </div>
+
+                                {monograph?.fdaLabel?.indicationsAndUsage && (
+                                    <div>
+                                        <strong style={{ fontSize: 13 }}>Live OpenFDA Indications &amp; Usage</strong>
+                                        <p style={{ fontSize: 12, color: "var(--mw-navy)", marginTop: 4 }}>{monograph.fdaLabel.indicationsAndUsage}</p>
                                     </div>
-                                    <div style={{ textAlign: "right" }}>
-                                        <strong style={{ fontSize: 22, color: "var(--mw-teal)" }}>₹{p.sellingPrice}</strong>
-                                        <div style={{ fontSize: 11, color: "var(--mw-muted)" }}>
-                                            Updated {new Date(p.lastUpdated).toLocaleDateString()}
+                                )}
+
+                                {monograph?.wiki?.extract && (
+                                    <div>
+                                        <strong style={{ fontSize: 13 }}>Encyclopedic Reference ({monograph.wiki.title})</strong>
+                                        <p style={{ fontSize: 12, color: "var(--mw-muted)", marginTop: 4 }}>{monograph.wiki.extract}</p>
+                                    </div>
+                                )}
+
+                                <p style={{ fontSize: 11, color: "var(--mw-muted)" }}>
+                                    Source: {selectedMed.sourceCitation} · Verified{" "}
+                                    {new Date(selectedMed.sourceLastVerifiedAt || selectedMed.updatedAt).toLocaleDateString()}
+                                </p>
+                            </div>
+
+                            <div style={{ display: "grid", gap: 12 }}>
+                                {(monograph?.structureImageUrl || selectedMed.structureImageUrl) && (
+                                    <div className="card-compact" style={{ textAlign: "center" }}>
+                                        <strong style={{ fontSize: 13, display: "block", marginBottom: 8 }}>
+                                            PubChem 2D Molecular Structure
+                                        </strong>
+                                        <SmartImage
+                                            src={monograph?.structureImageUrl || selectedMed.structureImageUrl}
+                                            fallbackSrc="/images/meds/capsule.svg"
+                                            alt={`${selectedMed.genericName || selectedMed.name} molecular structure`}
+                                            height={160}
+                                            fit="contain"
+                                        />
+                                    </div>
+                                )}
+
+                                {monograph?.rxNav?.therapeuticClasses?.length > 0 && (
+                                    <div className="card-compact">
+                                        <strong style={{ fontSize: 13, display: "block", marginBottom: 6 }}>NIH RxNav Therapeutic Classes</strong>
+                                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                                            {monograph.rxNav.therapeuticClasses.map((cls) => (
+                                                <span key={cls} className="status-badge neutral">{cls}</span>
+                                            ))}
                                         </div>
                                     </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+
+                    {monographTab === "safety" && (
+                        <div className="grid-2" style={{ alignItems: "start" }}>
+                            <div className="card-compact" style={{ background: "var(--mw-amber-bg)", borderColor: "var(--mw-amber-border)", display: "grid", gap: 10 }}>
+                                <div>
+                                    <strong style={{ fontSize: 13, color: "var(--mw-amber)" }}>FDA Warnings &amp; Precautions</strong>
+                                    <p style={{ fontSize: 13, color: "var(--mw-amber)", marginTop: 4 }}>
+                                        {monograph?.fdaLabel?.warnings || selectedMed.warnings || "Educational information only. Consult a licensed doctor or pharmacist before use."}
+                                    </p>
                                 </div>
-                            ))}
+                                {monograph?.fdaLabel?.contraindications && (
+                                    <div>
+                                        <strong style={{ fontSize: 13, color: "var(--mw-amber)" }}>Contraindications</strong>
+                                        <p style={{ fontSize: 12, color: "var(--mw-amber)", marginTop: 4 }}>{monograph.fdaLabel.contraindications}</p>
+                                    </div>
+                                )}
+                                {monograph?.fdaLabel?.pregnancyOrBreastfeeding && (
+                                    <div>
+                                        <strong style={{ fontSize: 13, color: "var(--mw-amber)" }}>Pregnancy &amp; Breastfeeding</strong>
+                                        <p style={{ fontSize: 12, color: "var(--mw-amber)", marginTop: 4 }}>{monograph.fdaLabel.pregnancyOrBreastfeeding}</p>
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="card-compact" style={{ display: "grid", gap: 10 }}>
+                                <div>
+                                    <strong style={{ fontSize: 13 }}>Adverse Reactions / Side Effects (OpenFDA)</strong>
+                                    <p style={{ fontSize: 12, color: "var(--mw-muted)", marginTop: 4 }}>
+                                        {monograph?.fdaLabel?.adverseReactions || "No adverse reaction extract returned for this label; refer to official package insert."}
+                                    </p>
+                                </div>
+                                <div>
+                                    <strong style={{ fontSize: 13 }}>Drug Interactions</strong>
+                                    <p style={{ fontSize: 12, color: "var(--mw-muted)", marginTop: 4 }}>
+                                        {monograph?.fdaLabel?.drugInteractions || "Always check with a licensed pharmacist before combining medications."}
+                                    </p>
+                                </div>
+                                <div>
+                                    <strong style={{ fontSize: 13 }}>Storage &amp; Handling</strong>
+                                    <p style={{ fontSize: 12, color: "var(--mw-muted)", marginTop: 4 }}>
+                                        {monograph?.fdaLabel?.storageAndHandling || selectedMed.storageInfo}
+                                    </p>
+                                </div>
+                                {monograph?.recalls?.length > 0 && (
+                                    <div className="alert-box warning" style={{ marginBottom: 0 }}>
+                                        <div>
+                                            <strong>Related Live FDA Recall Notice ({monograph.recalls[0].classification}):</strong>{" "}
+                                            {monograph.recalls[0].reasonForRecall}
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+
+                    {monographTab === "prices" && (
+                        <div>
+                            <h3 style={{ fontSize: 18, marginBottom: 12 }}>Verified Pharmacy Price Comparison</h3>
+                            {pricesLoading ? (
+                                <SkeletonCards count={2} />
+                            ) : prices.length === 0 ? (
+                                <p style={{ color: "var(--mw-muted)" }}>No pharmacy price listings available for this record yet.</p>
+                            ) : (
+                                <div style={{ display: "grid", gap: 10 }}>
+                                    {prices.map((p, idx) => {
+                                        const savings = selectedMed.mrp > p.sellingPrice
+                                            ? Math.round(((selectedMed.mrp - p.sellingPrice) / selectedMed.mrp) * 100)
+                                            : 0;
+                                        return (
+                                            <div key={p._id} className="card-compact" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12, borderColor: idx === 0 ? "var(--mw-teal)" : undefined }}>
+                                                <div>
+                                                    <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                                                        <strong>{p.pharmacy?.name}</strong>
+                                                        <StatusBadge status={p.pharmacy?.isVerified ? "verified" : "pending"} />
+                                                        {idx === 0 && <span className="status-badge active">Best Price</span>}
+                                                        {savings > 0 && <span className="status-badge verified">{savings}% Below MRP</span>}
+                                                    </div>
+                                                    <p style={{ fontSize: 13, color: "var(--mw-muted)", marginTop: 4 }}>
+                                                        {p.pharmacy?.address}, {p.pharmacy?.city} · Stock: {p.stockQuantity ?? 25} units · Batch: {p.batchNumber || "Verified"}
+                                                        {p.expiryDate ? ` · Exp ${new Date(p.expiryDate).toLocaleDateString()}` : ""}
+                                                    </p>
+                                                </div>
+                                                <div style={{ textAlign: "right" }}>
+                                                    <strong style={{ fontSize: 22, color: "var(--mw-teal)" }}>₹{p.sellingPrice}</strong>
+                                                    <div style={{ fontSize: 11, color: "var(--mw-muted)" }}>
+                                                        Updated {new Date(p.lastUpdated).toLocaleDateString()}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
                         </div>
                     )}
                 </section>

@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { apiRequest } from "../services/api";
 import { StatusBadge } from "../components/StatusBadge";
+import SmartImage from "../components/SmartImage";
 
 export default function Account() {
     const {
@@ -17,6 +18,7 @@ export default function Account() {
     const navigate = useNavigate();
 
     const [name, setName] = useState(user?.name || "");
+    const [phone, setPhone] = useState(user?.phone || "");
     const [city, setCity] = useState(user?.preferences?.city || "Jalandhar");
     const [accessibilityNeeds, setAccessibilityNeeds] = useState(user?.preferences?.accessibilityNeeds || "");
     const [analyticsOptIn, setAnalyticsOptIn] = useState(Boolean(user?.dpdpConsent?.analyticsOptIn));
@@ -26,6 +28,10 @@ export default function Account() {
     const [newPassword, setNewPassword] = useState("");
     const [mfaCodeHint, setMfaCodeHint] = useState("");
 
+    const [addresses, setAddresses] = useState(user?.savedAddresses || []);
+    const [newAddr, setNewAddr] = useState({ label: "Home", addressLine: "", locality: "", city: "Jalandhar", pinCode: "" });
+    const [savedMeds, setSavedMeds] = useState([]);
+    const [payments, setPayments] = useState([]);
     const [notifications, setNotifications] = useState([]);
     const [feedback, setFeedback] = useState({ type: "", message: "" });
 
@@ -38,8 +44,20 @@ export default function Account() {
         }
     };
 
+    const loadExtras = async () => {
+        const [addrRes, medRes, payRes] = await Promise.allSettled([
+            apiRequest("/auth/addresses"),
+            apiRequest("/auth/saved-medicines"),
+            apiRequest("/payments/my")
+        ]);
+        if (addrRes.status === "fulfilled") setAddresses(addrRes.value.data || []);
+        if (medRes.status === "fulfilled") setSavedMeds(medRes.value.data || []);
+        if (payRes.status === "fulfilled") setPayments(payRes.value.data || []);
+    };
+
     useEffect(() => {
         loadNotifications();
+        loadExtras();
     }, []);
 
     const saveProfile = async (e) => {
@@ -48,12 +66,39 @@ export default function Account() {
         try {
             await updatePreferences({
                 name,
+                phone,
                 language,
                 lowBandwidthMode: lowBandwidth,
                 preferences: { city, accessibilityNeeds },
                 dpdpConsent: { analyticsOptIn, notificationsOptIn }
             });
             setFeedback({ type: "success", message: "Profile & DPDP privacy preferences saved." });
+        } catch (err) {
+            setFeedback({ type: "error", message: err.message });
+        }
+    };
+
+    const addAddress = async (e) => {
+        e.preventDefault();
+        try {
+            const res = await apiRequest("/auth/addresses", {
+                method: "POST",
+                body: { ...newAddr, isDefault: addresses.length === 0 }
+            });
+            setAddresses(res.data || []);
+            if (res.user) setUser(res.user);
+            setNewAddr({ label: "Home", addressLine: "", locality: "", city: "Jalandhar", pinCode: "" });
+            setFeedback({ type: "success", message: "Delivery address saved." });
+        } catch (err) {
+            setFeedback({ type: "error", message: err.message });
+        }
+    };
+
+    const removeAddress = async (id) => {
+        try {
+            const res = await apiRequest(`/auth/addresses/${id}`, { method: "DELETE" });
+            setAddresses(res.data || []);
+            if (res.user) setUser(res.user);
         } catch (err) {
             setFeedback({ type: "error", message: err.message });
         }
@@ -151,7 +196,7 @@ export default function Account() {
         <div style={{ display: "grid", gap: 24 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
                 <div>
-                    <h1 style={{ fontSize: 28 }}>Account, Notifications &amp; DPDP Privacy Controls</h1>
+                    <h1 style={{ fontSize: 28 }}>Customer Account, Payments, Addresses &amp; Privacy</h1>
                     <p style={{ color: "var(--mw-muted)", fontSize: 14 }}>
                         Signed in as <strong>{user?.email}</strong> · Role: <strong>{user?.role}</strong>
                     </p>
@@ -169,9 +214,15 @@ export default function Account() {
                 <section className="card">
                     <h2 style={{ fontSize: 20, marginBottom: 14 }}>Profile &amp; Preferences</h2>
                     <form onSubmit={saveProfile} className="form-grid">
-                        <div className="field">
-                            <label htmlFor="profName">Full Name</label>
-                            <input id="profName" type="text" value={name} onChange={(e) => setName(e.target.value)} required />
+                        <div className="grid-2">
+                            <div className="field">
+                                <label htmlFor="profName">Full Name</label>
+                                <input id="profName" type="text" value={name} onChange={(e) => setName(e.target.value)} required />
+                            </div>
+                            <div className="field">
+                                <label htmlFor="profPhone">Phone Number</label>
+                                <input id="profPhone" type="text" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="+91-98..." />
+                            </div>
                         </div>
                         <div className="field">
                             <label htmlFor="profCity">Preferred City</label>
@@ -230,6 +281,101 @@ export default function Account() {
                 </section>
             </div>
 
+            {/* Saved Delivery Addresses & Bookmarked Medicines */}
+            <div className="grid-2" style={{ alignItems: "start" }}>
+                <section className="card">
+                    <h2 style={{ fontSize: 20, marginBottom: 12 }}>Saved Delivery Addresses ({addresses.length})</h2>
+                    {addresses.length > 0 && (
+                        <div style={{ display: "grid", gap: 8, marginBottom: 14 }}>
+                            {addresses.map((a) => (
+                                <div key={a._id} className="card-compact" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                                    <div>
+                                        <strong>{a.label}</strong> {a.isDefault && <span className="status-badge verified">Default</span>}
+                                        <p style={{ fontSize: 12, color: "var(--mw-muted)", marginTop: 2 }}>
+                                            {a.addressLine}, {a.locality}, {a.city} {a.pinCode}
+                                        </p>
+                                    </div>
+                                    <button type="button" className="btn btn-outline btn-sm" onClick={() => removeAddress(a._id)}>Remove</button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                    <form onSubmit={addAddress} className="form-grid" style={{ gap: 10 }}>
+                        <div className="grid-2">
+                            <input placeholder="Label (Home / Work)" value={newAddr.label} onChange={(e) => setNewAddr({ ...newAddr, label: e.target.value })} style={{ padding: 8, border: "1px solid #C6D8DA", borderRadius: 8 }} />
+                            <input placeholder="PIN Code" value={newAddr.pinCode} onChange={(e) => setNewAddr({ ...newAddr, pinCode: e.target.value })} style={{ padding: 8, border: "1px solid #C6D8DA", borderRadius: 8 }} />
+                        </div>
+                        <input placeholder="Street / House / Landmark" value={newAddr.addressLine} onChange={(e) => setNewAddr({ ...newAddr, addressLine: e.target.value })} required style={{ padding: 8, border: "1px solid #C6D8DA", borderRadius: 8 }} />
+                        <div className="grid-2">
+                            <input placeholder="Locality" value={newAddr.locality} onChange={(e) => setNewAddr({ ...newAddr, locality: e.target.value })} style={{ padding: 8, border: "1px solid #C6D8DA", borderRadius: 8 }} />
+                            <input placeholder="City" value={newAddr.city} onChange={(e) => setNewAddr({ ...newAddr, city: e.target.value })} style={{ padding: 8, border: "1px solid #C6D8DA", borderRadius: 8 }} />
+                        </div>
+                        <button type="submit" className="btn btn-secondary btn-sm">+ Add Delivery Address</button>
+                    </form>
+                </section>
+
+                <section className="card">
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                        <h2 style={{ fontSize: 20 }}>Saved Medicines &amp; Health List ({savedMeds.length})</h2>
+                        <Link to="/catalog" className="btn btn-outline btn-sm">Browse Catalog</Link>
+                    </div>
+                    {savedMeds.length === 0 ? (
+                        <p style={{ color: "var(--mw-muted)", fontSize: 13 }}>Bookmark medicines from the Catalog using the ☆ button to keep quick references here.</p>
+                    ) : (
+                        <div style={{ display: "grid", gap: 8 }}>
+                            {savedMeds.map((m) => (
+                                <Link key={m._id} to={`/catalog?q=${encodeURIComponent(m.name)}`} className="card-compact" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                    <SmartImage src={m.imageUrl} fallbackSrc="/images/meds/tablet.svg" alt={m.name} height={48} style={{ width: 64 }} />
+                                    <div style={{ flex: 1 }}>
+                                        <strong>{m.name}</strong>
+                                        <p style={{ fontSize: 12, color: "var(--mw-muted)" }}>{m.genericName} · {m.category}</p>
+                                    </div>
+                                    <strong style={{ color: "var(--mw-teal)" }}>₹{m.mrp}</strong>
+                                </Link>
+                            ))}
+                        </div>
+                    )}
+                </section>
+            </div>
+
+            {/* Payment Transaction History */}
+            <section className="card">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+                    <h2 style={{ fontSize: 20 }}>Payment Transactions &amp; Receipts ({payments.length})</h2>
+                    <Link to="/orders" className="btn btn-outline btn-sm">Open Orders</Link>
+                </div>
+                {payments.length === 0 ? (
+                    <p style={{ color: "var(--mw-muted)", fontSize: 13 }}>No gateway transactions yet.</p>
+                ) : (
+                    <div className="table-wrap">
+                        <table className="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Transaction ID</th>
+                                    <th>Order</th>
+                                    <th>Method</th>
+                                    <th>Amount</th>
+                                    <th>Status</th>
+                                    <th>Date</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {payments.map((tx) => (
+                                    <tr key={tx._id}>
+                                        <td><code>{tx.transactionId}</code></td>
+                                        <td>{tx.order?.orderNumber || "Pending"}</td>
+                                        <td>{tx.methodDetails?.label || tx.method}</td>
+                                        <td><strong>₹{tx.costBreakdown?.totalAmount || 0}</strong></td>
+                                        <td><StatusBadge status={tx.status === "captured" ? "verified" : tx.status === "refunded" ? "rejected" : "pending"} label={tx.status} /></td>
+                                        <td>{new Date(tx.createdAt).toLocaleString()}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </section>
+
             {/* Notification Center */}
             <section className="card">
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
@@ -267,7 +413,7 @@ export default function Account() {
             <section className="card">
                 <h2 style={{ fontSize: 20, marginBottom: 8 }}>DPDP Act 2023 &amp; Data Rights</h2>
                 <p style={{ fontSize: 13, color: "var(--mw-muted)", marginBottom: 14 }}>
-                    You can export all personal records stored in this pilot or request account deactivation and session revocation at any time.
+                    You can export all personal records stored in this platform or request account deactivation and session revocation at any time.
                 </p>
                 <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
                     <button type="button" className="btn btn-secondary" onClick={handleExportData}>

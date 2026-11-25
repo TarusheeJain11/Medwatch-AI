@@ -81,6 +81,7 @@ const connectWithRetry = async () => {
 };
 
 let listenersAttached = false;
+let autoReconnectEnabled = false;
 let retryAttempt = 0;
 let retryTimer = null;
 
@@ -105,6 +106,7 @@ const scheduleReconnect = (onConnected) => {
 };
 
 const connectDB = async ({ allowDeferred = false, onConnected = null } = {}) => {
+    autoReconnectEnabled = Boolean(allowDeferred);
     if (process.env.MONGO_DNS_SERVERS) {
         const servers = process.env.MONGO_DNS_SERVERS.split(",")
             .map((s) => s.trim())
@@ -124,7 +126,7 @@ const connectDB = async ({ allowDeferred = false, onConnected = null } = {}) => 
             }
         });
         mongoose.connection.on("disconnected", () => {
-            if (process.env.NODE_ENV !== "test") {
+            if (autoReconnectEnabled && process.env.NODE_ENV !== "test") {
                 console.warn("MongoDB disconnected; scheduling exponential-backoff reconnect...");
                 scheduleReconnect(onConnected);
             }
